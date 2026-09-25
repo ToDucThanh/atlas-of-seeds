@@ -1,11 +1,13 @@
 """Seed 282 - type a number, get a world, and scrub through its history.
 
-Run with:  uv run python world.py [seed] [year] [realm] [--globe]
+Run with:  uv run python world.py [seed] [year] [realm] [--globe] [--replay]
 e.g.       uv run python world.py 282 1184 Aar     (opens that world in 1184, with Aar selected)
            uv run python world.py 282 --globe      (opens on the spinning globe)
+           uv run python world.py 282 --globe --replay   (replays history, the camera following each war)
 """
 
 import asyncio
+import math
 import random
 import sys
 import time
@@ -28,6 +30,11 @@ SPIN_FPS = 60
 AUTO_SPIN = 0.16  # radians per second when idle: a full day in about 40 seconds
 MAX_SPIN = 8.0  # cap on flick speed, radians per second
 HOVER_HOLD = 4.0  # seconds the globe stays still after the mouse last moved over it
+FOCUS_ZOOM = 1.45  # how far the replay camera leans in on an event
+FOCUS_TILT = 0.9  # the camera never tilts past this latitude (radians) to face an event
+CAMERA_EASE = 2.6  # fraction of the remaining turn the camera covers per second
+TRAVEL_RATE = 0.03  # playback speed while the camera swings to the next event
+GLOBE_SLOW_MOTION = 0.1  # playback speed while the camera watches an event
 MARKER_STYLE = {  # emoji, caption background (#AARRGGBB) (emoji that render in colour everywhere; ⚔ does not)
     "battle": ("💥", "#d8101318"),
     "war": ("🏹", "#e07a1d17"),
@@ -103,6 +110,9 @@ async def main(page: ft.Page):
     spin_velocity = AUTO_SPIN
     dragging = False
     last_hover = 0.0  # when the mouse last moved over the map view
+    focus = None  # the history.Marker the replay camera is facing
+    camera_travelling = False  # True while the camera swings toward `focus`
+    home_tilt: float | None = None  # the viewer's tilt to return to once the camera lets go
     drag_last: tuple[float, float, float] | None = None  # x, y, time of the previous drag update
     flat = lights = None  # the flat frame and town lights for `flat_key`, reused while only the globe turns
     flat_key = None
@@ -350,10 +360,11 @@ async def main(page: ft.Page):
             detector.update()
 
     def drag_update(e: ft.DragUpdateEvent):
-        nonlocal spin, spin_velocity, drag_last
+        nonlocal spin, spin_velocity, drag_last, last_hover, home_tilt
         if not dragging:
             return
         x, y, now = e.local_position.x, e.local_position.y, time.monotonic()
+        last_hover, home_tilt = now, None  # the viewer has the globe now; the replay camera backs off
         last_x, last_y, last_t = drag_last
         turn = -(x - last_x) / globe.radius  # the surface follows the pointer
         spin += turn
@@ -378,12 +389,29 @@ async def main(page: ft.Page):
         nonlocal last_hover
         last_hover = 0.0
 
-    async def spinner():
-        """Turns the globe: an idle spin, momentum after a flick, and a gentle stop while the mouse moves over it.
+    def set_focus(m):
+        """Point the replay camera at marker `m` (or release it with None), leaning in while it looks."""
+        nonlocal focus, home_tilt, camera_travelling
+        if focus is None and m is not None and home_tilt is None:
+            home_tilt = globe.tilt
+        focus = m
+        camera_travelling = m is not None
+        scale = FOCUS_ZOOM if m is not None else 1.0
+        if detector.scale != scale:
+            detector.scale = scale
+            try:
+                detector.update()
+            except RuntimeError:
+                pass  # window closed
 
-        The stop keys off recent mouse movement rather than enter/exit, which a window left in the
-        background under the pointer never gets."""
-        nonlocal spin, spin_velocity
+    async def spinner():
+        """Moves the globe's camera.
+
+        Idle: a slow spin, momentum after a flick, and a gentle stop while the mouse moves over it (keyed
+        off recent movement rather than enter/exit, which a window left in the background never gets).
+        Replay: swings round to face each battle, sack and outbreak of war, leans in while it plays out,
+        then eases back to the viewer's tilt and resumes spinning. Touching the globe hands it back."""
+        nonlocal spin, spin_velocity, camera_travelling, home_tilt
         last = time.monotonic()
         while not renderer_task.done():
             await asyncio.sleep(1 / SPIN_FPS)
@@ -391,7 +419,31 @@ async def main(page: ft.Page):
             dt, last = now - last, now
             if view != "globe" or dragging:
                 continue
-            target = 0.0 if now - last_hover < HOVER_HOLD else AUTO_SPIN
+            viewer_active = now - last_hover < HOVER_HOLD
+            spot = world.history.spotlight(year) if playing and world is not None and not viewer_active else None
+            if spot is not focus:
+                set_focus(spot)
+            ease = min(1.0, dt * CAMERA_EASE)
+
+            if focus is not None:
+                want_spin = (focus.x + 0.5) / pl.W * 2 * math.pi  # bring the event to the centre of the disc
+                want_tilt = (0.5 - (focus.y + 0.5) / pl.H) * math.pi
+                d_spin = (want_spin - spin + math.pi) % (2 * math.pi) - math.pi  # the short way round
+                d_tilt = max(-FOCUS_TILT, min(FOCUS_TILT, want_tilt)) - globe.tilt
+                spin += d_spin * ease
+                globe.set_tilt(globe.tilt + d_tilt * ease)
+                spin_velocity = 0.0
+                camera_travelling = abs(d_spin) > 0.04 or abs(d_tilt) > 0.04
+                redraw.set()
+                continue
+
+            if home_tilt is not None:  # drift back to the tilt the viewer had before the replay took over
+                d_tilt = home_tilt - globe.tilt
+                globe.set_tilt(globe.tilt + d_tilt * ease)
+                if abs(d_tilt) < 0.002:
+                    home_tilt = None
+                redraw.set()
+            target = 0.0 if viewer_active else AUTO_SPIN
             spin_velocity += (target - spin_velocity) * min(1.0, dt * 1.5)
             if abs(spin_velocity) > 0.002:
                 spin += spin_velocity * dt
@@ -409,6 +461,8 @@ async def main(page: ft.Page):
         on_pan_end=drag_end,
         on_pan_cancel=lambda: drag_end(),
         content=ft.Stack([raw_image, labels, globe_labels], width=MAP_W, height=MAP_H),
+        scale=1.0,
+        animate_scale=ft.Animation(1100, ft.AnimationCurve.EASE_IN_OUT_CUBIC),
     )
     map_view = ft.Container(
         border_radius=12,
@@ -426,6 +480,7 @@ async def main(page: ft.Page):
     async def set_view(e):
         nonlocal view, spin_velocity
         view = e.control.selected[0]
+        set_focus(None)
         labels.visible, globe_labels.visible = view == "map", view == "globe"
         detector.mouse_cursor = ft.MouseCursor.GRAB if view == "globe" else ft.MouseCursor.CLICK
         spin_velocity = AUTO_SPIN
@@ -472,7 +527,11 @@ async def main(page: ft.Page):
         mine, run = generation, play_run
         step = (slider.max - slider.min) / (PLAY_SECONDS * PLAY_FPS)
         while playing and mine == generation and run == play_run and year < slider.max:
-            year = min(year + step * (SLOW_MOTION if world.history.busy(year) else 1), slider.max)
+            if view == "globe":  # the camera sets the pace: hold while it travels, slow while it watches
+                rate = TRAVEL_RATE if camera_travelling else GLOBE_SLOW_MOTION if focus is not None else 1
+            else:
+                rate = SLOW_MOTION if world.history.busy(year) else 1
+            year = min(year + step * rate, slider.max)
             slider.value = year
             redraw.set()
             await asyncio.sleep(1 / PLAY_FPS)
@@ -903,8 +962,9 @@ async def main(page: ft.Page):
         BACKGROUND_TASKS.add(task)  # the event loop only holds weak references to tasks
         task.add_done_callback(BACKGROUND_TASKS.discard)
 
-    # Optional command line: seed, year, realm name, and --globe.
-    args = [a for a in sys.argv[1:] if a != "--globe"]
+    # Optional command line: seed, year, realm name, --globe and --replay.
+    flags = {"--globe", "--replay"}
+    args = [a for a in sys.argv[1:] if a not in flags]
     if "--globe" in sys.argv[1:]:
         view = "globe"
         view_picker.selected = ["globe"]
@@ -921,6 +981,12 @@ async def main(page: ft.Page):
         match = next((rid for rid, name in realms if name.lower().startswith(wanted)), None)
         if match is not None:
             await select(match)
+    if "--replay" in sys.argv[1:] and world is not None:
+        if not (len(args) > 1 and args[1].isdigit()):
+            await jump_to(slider.max)  # playback restarts from the first year when it starts at the end
+        task = asyncio.create_task(toggle_play())
+        BACKGROUND_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_TASKS.discard)
 
 
 if __name__ == "__main__":

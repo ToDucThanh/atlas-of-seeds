@@ -91,6 +91,11 @@ class History:
         """True near a dramatic moment, so playback can slow down for it."""
         return any(m.kind in ("battle", "sack") and m.start - ahead <= year < m.start + 18 for m in self.markers)
 
+    def spotlight(self, year: float, ahead: float = 12, after: float = 18) -> Marker | None:
+        """The battle, sack or outbreak of war closest to its moment at `year`, for a replay camera to face."""
+        near = [m for m in self.markers if m.kind != "crown" and m.start - ahead <= year < m.start + after]
+        return min(near, key=lambda m: abs(m.start - year), default=None)
+
 
 def _mid(title: str) -> str:
     """'The Kingdom of X' -> 'the Kingdom of X', for use mid-sentence."""
