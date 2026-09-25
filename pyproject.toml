@@ -1,0 +1,15 @@
+[project]
+name = "flet-first-try"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flet[all]>=1.0.1",
+    "numpy>=2.5.3",
+]
+
+[dependency-groups]
+dev = [
+    "flet-mcp>=1.0.1",
+]
