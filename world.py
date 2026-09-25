@@ -75,6 +75,19 @@ def lost_sigil(r, size: int = 28) -> ft.Control:
     return sigil(r.color, ft.Icons.HISTORY_EDU, size)
 
 
+def event_badge(m) -> ft.Control:
+    """A battle, war or sack marker: its emoji on a dark disc (so thin glyphs like 🏹 read over the red
+    war hatching) above a caption pill. 46 px tall, with the disc centred 15 px below the top."""
+    emoji, bg = MARKER_STYLE[m.kind]
+    return ft.Column(
+        [ft.Container(width=30, height=30, border_radius=15, bgcolor="#c80b0d13", border=ft.Border.all(1, "#40ffffff"),
+                      alignment=ft.Alignment.CENTER, content=ft.Text(emoji, size=17)),
+         ft.Container(ft.Text(m.caption, size=10, color="#fff4dc", weight=ft.FontWeight.W_600),
+                      bgcolor=bg, border_radius=8, padding=ft.Padding.symmetric(horizontal=6, vertical=1))],
+        spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True,
+    )
+
+
 def format_population(n: int) -> str:
     return f"{n / 1e6:.1f} million" if n >= 1_000_000 else f"{n:,}"
 
@@ -227,7 +240,7 @@ async def main(page: ft.Page):
         marker_controls.clear()
         pop = ft.Animation(350, ft.AnimationCurve.EASE_OUT_BACK)
         for m in p.history.markers:
-            emoji, bg = MARKER_STYLE[m.kind]
+            emoji = MARKER_STYLE[m.kind][0]
             cx, cy = m.x * SCALE, m.y * SCALE
             if m.kind == "crown":  # a small crown beside the capital star; the ticker tells the story
                 ctl = ft.Container(left=cx + 3, top=cy - 22, tooltip=m.caption, opacity=0, scale=0.6,
@@ -235,14 +248,8 @@ async def main(page: ft.Page):
                                    content=ft.Text(emoji, size=14, style=ft.TextStyle(shadow=LABEL_SHADOW)))
             else:
                 ctl = ft.Container(
-                    left=min(max(cx - 80, 0), MAP_W - 160), top=min(max(cy - 16, 0), MAP_H - 44), width=160,
-                    opacity=0, scale=0.6, animate_opacity=300, animate_scale=pop,
-                    content=ft.Column(
-                        [ft.Text(emoji, size=20, style=ft.TextStyle(shadow=LABEL_SHADOW)),
-                         ft.Container(ft.Text(m.caption, size=10, color="#fff4dc", weight=ft.FontWeight.W_600),
-                                      bgcolor=bg, border_radius=8, padding=ft.Padding.symmetric(horizontal=6, vertical=1))],
-                        spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True,
-                    ),
+                    left=min(max(cx - 80, 0), MAP_W - 160), top=min(max(cy - 15, 0), MAP_H - 46), width=160,
+                    opacity=0, scale=0.6, animate_opacity=300, animate_scale=pop, content=event_badge(m),
                 )
             marker_controls.append((ctl, m))
         labels.controls = markers + names + [c for c, _ in marker_controls]
@@ -260,18 +267,12 @@ async def main(page: ft.Page):
             return len(text) * (size * per_char + spacing) + 4
 
         for m in p.history.markers:
-            emoji, bg = MARKER_STYLE[m.kind]
+            emoji = MARKER_STYLE[m.kind][0]
             if m.kind == "crown":
                 ctl = ft.Container(tooltip=m.caption, content=ft.Text(emoji, size=14, style=ft.TextStyle(shadow=LABEL_SHADOW)))
                 add(ctl, m.y, m.x, 3, -22, 18, 20, ("marker", m))
             else:
-                ctl = ft.Container(width=160, content=ft.Column(
-                    [ft.Text(emoji, size=20, style=ft.TextStyle(shadow=LABEL_SHADOW)),
-                     ft.Container(ft.Text(m.caption, size=10, color="#fff4dc", weight=ft.FontWeight.W_600),
-                                  bgcolor=bg, border_radius=8, padding=ft.Padding.symmetric(horizontal=6, vertical=1))],
-                    spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True,
-                ))
-                add(ctl, m.y, m.x, -80, -16, 160, 44, ("marker", m))
+                add(ft.Container(width=160, content=event_badge(m)), m.y, m.x, -80, -15, 160, 46, ("marker", m))
 
         realms = [(k.id, k.name, k.label_pos) for k in p.kingdoms] + [(r.id, r.name, r.label_pos) for r in p.history.lost]
         for rid, name, (y, x) in realms:
