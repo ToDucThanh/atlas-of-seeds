@@ -86,36 +86,6 @@ class World:
         self.mat[:] = EMPTY
         self.data[:] = 0
 
-    def load_demo(self):
-        """A starter scene: sand raining into an oil-topped pool, a ramp, and a smouldering garden."""
-        self.clear()
-        W, H = self.width, self.height
-
-        def fill(x0, y0, x1, y1, material, spray=1.0):
-            region = (slice(int(y0 * H), int(y1 * H)), slice(int(x0 * W), int(x1 * W)))
-            m = self.mat[region]
-            mask = self.rng.random(m.shape) < spray
-            m[mask] = material
-            self.data[region][mask] = self.rng.integers(0, 256, int(mask.sum()), dtype=np.uint8)
-
-        # Pool: wall cup holding water with a slick of oil, and sand above it that sinks through both.
-        fill(0.06, 0.55, 0.08, 0.95, WALL)
-        fill(0.36, 0.55, 0.38, 0.95, WALL)
-        fill(0.06, 0.93, 0.38, 0.95, WALL)
-        fill(0.08, 0.72, 0.36, 0.93, WATER)
-        fill(0.08, 0.64, 0.36, 0.72, OIL)
-        fill(0.15, 0.05, 0.28, 0.20, SAND, 0.8)
-        # Sand pouring down a 45-degree ramp.
-        fill(0.50, 0.05, 0.58, 0.22, SAND, 0.8)
-        x0, y0 = int(0.60 * W), int(0.32 * H)
-        for i in range(int(0.12 * W)):
-            self.mat[y0 + i : y0 + i + 2, x0 - i] = WALL
-        # Garden on a ledge, with a spark at one end.
-        fill(0.66, 0.80, 0.96, 0.82, WALL)
-        fill(0.68, 0.62, 0.94, 0.80, PLANT, 0.9)
-        fill(0.93, 0.58, 0.95, 0.62, FIRE)
-        self.data[self.mat == FIRE] = 60
-
     # ------------------------------------------------------------------ painting
 
     def paint(self, cx: int, cy: int, radius: int, material: int):

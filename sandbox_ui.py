@@ -1,7 +1,7 @@
 """The falling-sand screen: material picker, brush, play/pause and a canvas you paint on.
 
-Shared by the standalone sandbox (main.py) and Atlas's cross-sections (world.py), which pass their own
-title, a reset action, and anything to draw over the canvas, such as town labels.
+Atlas's cross-sections (world.py) open in it, passing their own title, a reset action, and anything to
+draw over the canvas, such as town labels.
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ class SandboxView:
     # ------------------------------------------------------------ pointer input
     # These arrive up to 100 times a second and only record where the pointer is; the frame loop draws.
     # Each switches off Flet's auto-update, which would otherwise re-check the whole page after every
-    # event - cheap in the standalone sandbox, but inside Atlas it halved the frame rate while painting.
+    # event - inside Atlas that halved the frame rate while painting.
 
     def to_cell(self, pos: ft.Offset) -> tuple[int, int]:
         return int(pos.x // CELL_SIZE), int(pos.y // CELL_SIZE)
