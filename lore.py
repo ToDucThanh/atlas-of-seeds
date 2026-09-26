@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from itertools import pairwise
 
 import planet as pl
 
@@ -303,7 +304,7 @@ def _describe_kingdom(p: pl.Planet, k: pl.Kingdom, lang: Language, rng: random.R
     ruler = reigns[-1].display
     history.append((founded, f"Founded by {reigns[0].display}, who raised the walls of {capital.name}."))
     usurpations = []
-    for before, after in zip(reigns, reigns[1:]):
+    for before, after in pairwise(reigns):
         if before.fate == "was overthrown":
             text = f"{after.display} seizes the throne from {before.display}; House {after.house} begins."
             history.append((after.start, text))

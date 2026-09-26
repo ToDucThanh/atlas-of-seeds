@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 import numpy as np
 
@@ -342,7 +343,7 @@ def _make_rivers(rng, h, land, elev, moist, biome, peak_m):
         if end is None or len(path) < 10:
             continue
 
-        for a, b in zip(path, path[1:]):
+        for a, b in pairwise(path):
             downstream[a] = b
         for cell in path[:-1] if end == "merge" else path:
             flow[cell] += 1

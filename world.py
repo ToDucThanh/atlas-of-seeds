@@ -1149,7 +1149,7 @@ async def main(page: ft.Page):
         sound_button.update()
         try:
             await asyncio.wait_for(prefs.set(MUTED_KEY, soundtrack.muted), st.CALL_TIMEOUT)
-        except Exception:  # noqa: BLE001 - remembering the choice is a nicety
+        except Exception:  # noqa: BLE001, S110 - remembering the choice is a nicety
             pass
 
     sound_button.on_click = toggle_sound
@@ -1179,7 +1179,7 @@ async def main(page: ft.Page):
         page.update()
         try:
             await asyncio.wait_for(wakelock.enable(), st.CALL_TIMEOUT)
-        except Exception:  # noqa: BLE001 - staying awake is best effort
+        except Exception:  # noqa: BLE001, S110 - staying awake is best effort
             pass
         spawn(cinema_loop(cinema_run))
 
@@ -1204,7 +1204,7 @@ async def main(page: ft.Page):
         page.update()
         try:
             await asyncio.wait_for(wakelock.disable(), st.CALL_TIMEOUT)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
     cinema_close.on_click = leave_cinema
@@ -1410,7 +1410,7 @@ async def main(page: ft.Page):
 
         try:
             (p, land_held), drone = await asyncio.gather(asyncio.to_thread(build), soundtrack.drone_for(seed))
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001 - any failure keeps the previous world on screen
             if mine == generation:  # keep showing the previous world
                 progress.visible = False
                 labels.opacity = globe_labels.opacity = 1 if world is not None else 0
@@ -1441,7 +1441,7 @@ async def main(page: ft.Page):
                     return
                 t = 1 - (i + 1) / REVEAL_FRAMES
                 sea = (1 - p.sea) * t * t
-                await show(await asyncio.to_thread(lambda: present(pl.render(p, mode, None, sea_rise=sea), p)))
+                await show(await asyncio.to_thread(lambda sea=sea: present(pl.render(p, mode, None, sea_rise=sea), p)))
                 await asyncio.sleep(1 / 60)
         except RuntimeError:
             return  # window closed mid-animation
@@ -1528,7 +1528,7 @@ async def main(page: ft.Page):
         await page.window.center()
     try:
         soundtrack.set_muted(bool(await asyncio.wait_for(prefs.get(MUTED_KEY), st.CALL_TIMEOUT)))
-    except Exception:  # noqa: BLE001 - no stored choice, or no storage: sound stays on
+    except Exception:  # noqa: BLE001, S110 - no stored choice, or no storage: sound stays on
         pass
     show_sound_state()
     await soundtrack.load()

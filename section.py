@@ -124,8 +124,8 @@ class Section:
         ny, nx = dx / norm, -dy / norm  # perpendicular to the cut
         cells = []
         for k in (-1, 0, 1):
-            y = int(round(self.ys[col] + ny * k))
-            x = int(round(self.xs[col] + nx * k)) % pl.W
+            y = round(self.ys[col] + ny * k)
+            x = round(self.xs[col] + nx * k) % pl.W
             if 0 <= y < pl.H:
                 cells.append((y, x))
         return cells
@@ -187,7 +187,7 @@ def _place_name(p: pl.Planet, owners: np.ndarray, y: float, x: float) -> str:
     near = min(p.towns, key=lambda t: (t.y - y) ** 2 + min(abs(t.x - x), pl.W - abs(t.x - x)) ** 2, default=None)
     if near is not None and (near.y - y) ** 2 + min(abs(near.x - x), pl.W - abs(near.x - x)) ** 2 <= 12 ** 2:
         return near.name
-    cy, cx = int(round(y)) % pl.H, int(round(x)) % pl.W
+    cy, cx = round(y) % pl.H, round(x) % pl.W
     rid = int(owners[cy, cx])
     if rid >= 0:
         realms = list(p.kingdoms) + list(p.history.lost)

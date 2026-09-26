@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import flet as ft
 import flet_audio as fta
