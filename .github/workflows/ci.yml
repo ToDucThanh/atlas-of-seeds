@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
 
       # Pinned, so a new ruff release with new default rules can't turn main red on its own.
       - name: Ruff
