@@ -1,5 +1,7 @@
 # Atlas of Seeds
 
+[![CI](https://github.com/ToDucThanh/atlas-of-seeds/actions/workflows/ci.yml/badge.svg)](https://github.com/ToDucThanh/atlas-of-seeds/actions/workflows/ci.yml)
+
 **Type a number or a word, get a world, and scrub through its history on a spinning globe.**
 
 ### [▶ Try it at atlasofseeds.com](https://atlasofseeds.com)

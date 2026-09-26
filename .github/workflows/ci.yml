@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Lint and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+
+      # Pinned, so a new ruff release with new default rules can't turn main red on its own.
+      - name: Ruff
+        run: uvx ruff@0.16.9 check --output-format=github .
+
+      - name: Lockfile matches pyproject.toml
+        run: uv lock --check
+
+      - name: Install locked dependencies
+        run: uv sync --locked --no-dev
+
+      # Every module imports, and a world generates the same way it does in production.
+      - name: Generate a world
+        run: |
+          uv run --no-sync python - <<'EOF'
+          import planet as pl
+          import sandbox_ui, section, soundtrack, world  # noqa: F401 - import check
+
+          for text in ("282", "atlantis"):
+              p = pl.generate(pl.seed_from_text(text))
+              assert p.kingdoms and p.towns, text
+              print(f"world {text}: {len(p.kingdoms)} realms, {len(p.towns)} towns, {p.year - p.history.start} years")
+          EOF
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.16"
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      # No backend and no credentials: this checks the configuration, not the live infrastructure.
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
