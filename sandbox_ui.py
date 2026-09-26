@@ -7,6 +7,7 @@ draw over the canvas, such as town labels.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Callable
 
@@ -36,7 +37,7 @@ def hex_color(rgb) -> str:
 
 
 class SandboxView:
-    """Build with a sand.World, add `control` to a page, then `start()`; `stop()` ends the frame loop.
+    """Build with a sand.World, add `control` to a page, then `start()`; `await stop()` ends the frame loop.
 
     `reset` is (label, action) for the button and the D key; `overlay` controls are drawn over the canvas
     (positioned in canvas pixels, and they don't block painting); `header` sits between the title and
@@ -61,6 +62,8 @@ class SandboxView:
         self.pointer: tuple[int, int] | None = None  # cell under the mouse
         self.last_painted: tuple[int, int] | None = None
         self.task: asyncio.Task | None = None
+        self.drawing = threading.Lock()  # held while a frame is drawn on a worker thread
+        self.chores: list[Callable[[], None]] = []  # world changes waiting for the next frame
         width, height = world.width * CELL_SIZE, world.height * CELL_SIZE
 
         # One frame pixel per cell; the client upscales with nearest-neighbour so grains stay crisp and
@@ -117,9 +120,9 @@ class SandboxView:
                         ft.Icon(ft.Icons.BRUSH, size=18, color=ft.Colors.ON_SURFACE_VARIANT),
                         self.brush_slider,
                         ft.OutlinedButton("Clear", icon=ft.Icons.DELETE_SWEEP, tooltip="Clear (C)",
-                                          on_click=lambda: self.world.clear()),
+                                          on_click=lambda: self.tend(self.world.clear)),
                         ft.OutlinedButton(reset_label, icon=ft.Icons.AUTO_AWESOME, tooltip=f"{reset_label} (D)",
-                                          on_click=lambda: self.reset_action()),
+                                          on_click=lambda: self.tend(self.reset_action)),
                     ],
                 ),
                 ft.Container(
@@ -183,16 +186,16 @@ class SandboxView:
         if e.scroll_delta and e.scroll_delta.y:
             self.set_brush(self.brush + (-1 if e.scroll_delta.y > 0 else 1))
 
-    def paint_stroke(self):
+    def paint_stroke(self, pointer: tuple[int, int]):
         """Paint discs along the path since the last frame so fast strokes stay continuous."""
         mat = sand.EMPTY if self.erasing else self.material
-        x1, y1 = self.pointer
-        x0, y0 = self.last_painted or self.pointer
+        x1, y1 = pointer
+        x0, y0 = self.last_painted or pointer
         steps = max(1, int(max(abs(x1 - x0), abs(y1 - y0)) / max(self.brush / 2, 1)))
         for i in range(1, steps + 1):
             t = i / steps
             self.world.paint(round(x0 + (x1 - x0) * t), round(y0 + (y1 - y0) * t), self.brush, mat)
-        self.last_painted = self.pointer
+        self.last_painted = pointer
 
     # ------------------------------------------------------------------ toolbar
 
@@ -219,9 +222,9 @@ class SandboxView:
         if key in ("space", " "):
             self.toggle_playing()
         elif key == "c":
-            self.world.clear()
+            self.tend(self.world.clear)
         elif key == "d":
-            self.reset_action()
+            self.tend(self.reset_action)
         elif key == "[":
             self.set_brush(self.brush - 1)
         elif key == "]":
@@ -235,25 +238,41 @@ class SandboxView:
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._run())
 
-    def stop(self):
+    async def stop(self):
+        """End the frame loop, and wait out any frame still being drawn, so the world holds still after."""
         if self.task is not None:
             self.task.cancel()
             self.task = None
+        await asyncio.to_thread(self.drawing.acquire)
+        self.drawing.release()
+
+    def tend(self, chore: Callable[[], None]):
+        """Change the world (clear it, reset it) between frames, which are drawn on another thread."""
+        self.chores.append(chore)
+
+    def _frame(self, stroke: tuple[int, int] | None, cursor: tuple[int, int, int] | None):
+        """One frame, on a worker thread so it doesn't hold up the event loop: chores, paint, step, draw."""
+        with self.drawing:
+            while self.chores:
+                self.chores.pop(0)()
+            if stroke is not None:
+                self.paint_stroke(stroke)
+            if self.playing:
+                self.world.step()
+                if self.on_step:
+                    self.on_step(self.world)
+            return self.world.render(cursor)
 
     async def _run(self):
         frame_times: list[float] = []
         last_stats = 0.0
         while True:
             started = time.monotonic()
-            if self.pointer_down and self.pointer is not None:
-                self.paint_stroke()
-            if self.playing:
-                self.world.step()
-                if self.on_step:
-                    self.on_step(self.world)
-            cursor = (*self.pointer, self.brush) if self.pointer is not None else None
+            pointer = self.pointer  # read once: the pointer handlers keep changing it meanwhile
+            stroke = pointer if self.pointer_down else None
+            cursor = (*pointer, self.brush) if pointer is not None else None
             try:
-                await self.raw_image.render(self.world.render(cursor))
+                await self.raw_image.render(await asyncio.to_thread(self._frame, stroke, cursor))
             except (RuntimeError, TimeoutError):
                 return  # window closed, or the view left the page
 

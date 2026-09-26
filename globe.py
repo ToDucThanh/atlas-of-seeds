@@ -5,11 +5,16 @@ a day: towns roll over the terminator and light up on the night side. Everything
 that depends only on screen position (which map cell a pixel sees before spin,
 sunlight, atmosphere, stars) is precomputed per view latitude, so a frame is one
 gather from the flat map plus a few multiplies.
+
+Frames may be drawn on a worker thread while the event loop steers the camera: the
+camera only aims the tilt (aim_tilt), and render() applies it, publishing each
+tilt's lookup in one assignment so a frame never mixes two tilts.
 """
 
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import numpy as np
 
@@ -35,6 +40,17 @@ def _light_kernel(radius: int = 4) -> np.ndarray:
 KERNEL = _light_kernel()
 
 
+class Lookup(NamedTuple):
+    """Everything a frame needs that depends only on the view latitude, per frame pixel on the planet."""
+    index: np.ndarray  # frame pixels covered by the planet
+    row: np.ndarray  # map row each one sees
+    col0: np.ndarray  # map column each one sees, before spin
+    shade: np.ndarray
+    night: np.ndarray
+    spec: np.ndarray
+    haze: np.ndarray
+
+
 def town_lights(p: pl.Planet, owners: np.ndarray) -> np.ndarray:
     """(H, W) glow of every town standing in this year; free towns always stand."""
     lights = np.zeros((pl.H, pl.W), np.float32)
@@ -54,9 +70,11 @@ class Globe:
         self.width, self.height = width, height
         self.radius = height * 0.46
         self.cx, self.cy = width / 2, height / 2
-        self.tilt = None
+        self.tilt = None  # the view latitude frames are drawn at, which project() and cell_at() follow
+        self.lookup: Lookup | None = None
         self.background = self._starfield(np.random.default_rng(seed))
         self.set_tilt(0.35)
+        self.aim = self.tilt  # the view latitude the camera wants; render() moves to it
 
     # ------------------------------------------------------------------ setup
 
@@ -80,17 +98,20 @@ class Globe:
         frame[..., 3] = 255
         return frame
 
+    def aim_tilt(self, tilt: float):
+        """Ask for view latitude `tilt` (radians); the next render() draws from there. Cheap: call it often."""
+        self.aim = float(np.clip(tilt, -MAX_TILT, MAX_TILT))
+
     def set_tilt(self, tilt: float):
-        """Recompute the per-pixel lookup for looking down from view latitude `tilt` (radians)."""
+        """Recompute the per-pixel lookup for looking down from view latitude `tilt` (radians). About 5 ms."""
         tilt = float(np.clip(tilt, -MAX_TILT, MAX_TILT))
         if tilt == self.tilt:
             return
-        self.tilt = tilt
         h, w = self.height, self.width
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
         x, y = (xx - self.cx) / self.radius, (self.cy - yy) / self.radius
         disk = x * x + y * y < 1
-        self.index = np.flatnonzero(disk)  # frame pixels covered by the planet
+        index = np.flatnonzero(disk)
         x, y = x[disk], y[disk]
         z = np.sqrt(1 - x * x - y * y)
 
@@ -100,35 +121,35 @@ class Globe:
         wz = -y * st + z * ct
         lat = np.arcsin(np.clip(wy, -1, 1))
         lon = np.arctan2(x, wz)
-        self.row = np.clip(((0.5 - lat / math.pi) * pl.H).astype(np.int32), 0, pl.H - 1)
-        self.col0 = (lon / (2 * math.pi) * pl.W).astype(np.float32)
+        row = np.clip(((0.5 - lat / math.pi) * pl.H).astype(np.int32), 0, pl.H - 1)
+        col0 = (lon / (2 * math.pi) * pl.W).astype(np.float32)
 
         # The sun is fixed relative to the viewer, so all lighting is per screen pixel.
         n_dot_l = x * SUN[0] + y * SUN[1] + z * SUN[2]
         day = np.clip((n_dot_l + 0.08) / 0.3, 0, 1)
         day = day * day * (3 - 2 * day)
-        self.shade = (0.1 + 0.9 * day * (0.35 + 0.65 * np.maximum(n_dot_l, 0)))[:, None]
-        self.night = (1 - day) * 0.95
-        self.spec = np.maximum(x * HALF[0] + y * HALF[1] + z * HALF[2], 0) ** 60 * day * 110
+        shade = (0.1 + 0.9 * day * (0.35 + 0.65 * np.maximum(n_dot_l, 0)))[:, None]
+        spec = np.maximum(x * HALF[0] + y * HALF[1] + z * HALF[2], 0) ** 60 * day * 110
         rim = (1 - z) ** 2.5 * (0.25 + 0.75 * day)
-        self.haze = (rim * 0.75)[:, None]
+        self.lookup = Lookup(index, row, col0, shade, (1 - day) * 0.95, spec, (rim * 0.75)[:, None])
+        self.tilt = tilt
 
     # ---------------------------------------------------------------- per frame
 
-    def _cols(self, spin: float) -> np.ndarray:
-        return np.floor(self.col0 + spin / (2 * math.pi) * pl.W).astype(np.int32) % pl.W
-
     def render(self, flat: np.ndarray, spin: float, water: np.ndarray, lights: np.ndarray | None = None) -> np.ndarray:
-        """RGBA (height, width, 4) globe from a flat (H, W, 4) planet frame, turned `spin` radians east."""
-        cols = self._cols(spin)
-        rgb = flat[self.row, cols, :3].astype(np.float32) * self.shade
-        rgb += (self.spec * water[self.row, cols])[:, None]
+        """RGBA (height, width, 4) globe from a flat (H, W, 4) planet frame, turned `spin` radians east,
+        seen from the aimed tilt."""
+        self.set_tilt(self.aim)
+        lk = self.lookup
+        cols = np.floor(lk.col0 + spin / (2 * math.pi) * pl.W).astype(np.int32) % pl.W
+        rgb = flat[lk.row, cols, :3].astype(np.float32) * lk.shade
+        rgb += (lk.spec * water[lk.row, cols])[:, None]
         if lights is not None:
-            rgb += (lights[self.row, cols] * self.night)[:, None] * CITY_LIGHT
-        rgb += self.haze * (ATMOSPHERE - rgb)
+            rgb += (lights[lk.row, cols] * lk.night)[:, None] * CITY_LIGHT
+        rgb += lk.haze * (ATMOSPHERE - rgb)
 
         frame = self.background.copy()
-        frame.reshape(-1, 4)[self.index, :3] = np.clip(rgb, 0, 255)
+        frame.reshape(-1, 4)[lk.index, :3] = np.clip(rgb, 0, 255)
         return frame
 
     def project(self, ys: np.ndarray, xs: np.ndarray, spin: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

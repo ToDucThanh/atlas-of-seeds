@@ -33,6 +33,9 @@ import soundtrack as st
 SCALE = 2  # screen pixels per map cell
 MAP_W, MAP_H = pl.W * SCALE, pl.H * SCALE
 PANEL_W = 360
+SIDE_H = MAP_H + 150
+LAYOUT_H = MAP_H + 190  # the map column (toolbar, map, timeline, status) before the layout is fitted to the window
+PAGE_PAD = 16
 DEFAULT_SEED = "282"
 REVEAL_FRAMES = 28
 PLAY_SECONDS = 12  # a full replay of history, before slow motion around battles
@@ -43,6 +46,9 @@ SPIN_FPS = 60
 # 240 KB and ten times slower to encode), and at most this many a second.
 WEB_GLOBE_FPS = 15
 WEB_JPEG_QUALITY = 80
+# ...and their globe spins on its own for this many seconds after they last touched the map, then comes to
+# rest, so an idle tab costs nothing. (Replays and cinema keep it moving; on the desktop it always spins.)
+WEB_IDLE_SPIN = 30.0
 AUTO_SPIN = 0.16  # radians per second when idle: a full day in about 40 seconds
 MAX_SPIN = 8.0  # cap on flick speed, radians per second
 HOVER_HOLD = 4.0  # seconds the globe stays still after the mouse last moved over it
@@ -119,6 +125,12 @@ def jpeg(frame: np.ndarray) -> bytes:
     return out.getvalue()
 
 
+def draw_flat(p: pl.Planet, mode: str, selected: int | None, year: float):
+    """Who owns each cell in `year`, the flat map then, and its towns' night lights."""
+    owners = p.history.owners_at(p, year)
+    return owners, pl.render(p, mode, selected, year=year), gl.town_lights(p, owners)
+
+
 def format_population(n: int) -> str:
     return f"{n / 1e6:.1f} million" if n >= 1_000_000 else f"{n:,}"
 
@@ -128,7 +140,8 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.DARK
     page.theme = ft.Theme(color_scheme_seed="#5b8fd6")
     page.bgcolor = "#0b0d13"
-    page.padding = 16
+    page.padding = PAGE_PAD
+    page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     if not page.web:
         page.window.width = MAP_W + PANEL_W + 72
         page.window.height = MAP_H + 262
@@ -154,6 +167,7 @@ async def main(page: ft.Page):
     spin_velocity = AUTO_SPIN
     dragging = False
     last_hover = 0.0  # when the mouse last moved over the map view
+    last_activity = time.monotonic()  # when the viewer last hovered, dragged or clicked the map, or changed world
     focus = None  # the history.Marker the replay camera is facing
     camera_travelling = False  # True while the camera swings toward `focus`
     home_tilt: float | None = None  # the viewer's tilt to return to once the camera lets go
@@ -381,9 +395,9 @@ async def main(page: ft.Page):
         return (y, x) if 0 <= x < pl.W and 0 <= y < pl.H else None
 
     def on_hover(e):
-        nonlocal hovered_cell, last_hover
+        nonlocal hovered_cell, last_hover, last_activity
         ft.context.disable_auto_update()  # frequent; it updates the status line itself when that changes
-        last_hover = time.monotonic()
+        last_hover = last_activity = time.monotonic()
         cell = cell_at(e.local_position)
         if world is None or owners is None or cell is None or cell == hovered_cell:
             return
@@ -396,6 +410,8 @@ async def main(page: ft.Page):
         return (CUT_HINT + " · " if slicing else "") + world.describe_cell(*cell, owners)
 
     async def on_tap(e):
+        nonlocal last_activity
+        last_activity = time.monotonic()
         cell = cell_at(e.local_position)
         if world is None or owners is None or cell is None or slicing:
             return
@@ -417,7 +433,7 @@ async def main(page: ft.Page):
             detector.update()
 
     def drag_update(e: ft.DragUpdateEvent):
-        nonlocal spin, spin_velocity, drag_last, last_hover, home_tilt, slice_line
+        nonlocal spin, spin_velocity, drag_last, last_hover, last_activity, home_tilt, slice_line
         ft.context.disable_auto_update()  # frequent; the renderer draws the result
         if slicing and slice_line is not None:
             x = min(max(e.local_position.x, 0), MAP_W - 1)
@@ -428,13 +444,14 @@ async def main(page: ft.Page):
         if not dragging:
             return
         x, y, now = e.local_position.x, e.local_position.y, time.monotonic()
-        last_hover, home_tilt = now, None  # the viewer has the globe now; the replay camera backs off
+        last_hover = last_activity = now
+        home_tilt = None  # the viewer has the globe now; the replay camera backs off
         last_x, last_y, last_t = drag_last
         turn = -(x - last_x) / globe.radius  # the surface follows the pointer
         spin += turn
         if now > last_t:
             spin_velocity = 0.6 * turn / (now - last_t) + 0.4 * spin_velocity
-        globe.set_tilt(globe.tilt + (y - last_y) / globe.radius)
+        globe.aim_tilt(globe.aim + (y - last_y) / globe.radius)
         drag_last = (x, y, now)
         redraw.set()
 
@@ -461,7 +478,7 @@ async def main(page: ft.Page):
         """Point the replay camera at marker `m` (or release it with None), leaning in while it looks."""
         nonlocal focus, home_tilt, camera_travelling
         if focus is None and m is not None and home_tilt is None:
-            home_tilt = globe.tilt
+            home_tilt = globe.aim
         focus = m
         camera_travelling = m is not None
         scale = FOCUS_ZOOM if m is not None else 1.0
@@ -476,7 +493,8 @@ async def main(page: ft.Page):
         """Moves the globe's camera.
 
         Idle: a slow spin, momentum after a flick, and a gentle stop while the mouse moves over it (keyed
-        off recent movement rather than enter/exit, which a window left in the background never gets).
+        off recent movement rather than enter/exit, which a window left in the background never gets). A web
+        visitor's globe comes to rest WEB_IDLE_SPIN seconds after they last touched the map.
         Replay: swings round to face each battle, sack and outbreak of war, leans in while it plays out,
         then eases back to the viewer's tilt and resumes spinning. Touching the globe hands it back."""
         nonlocal spin, spin_velocity, camera_travelling, home_tilt
@@ -497,21 +515,22 @@ async def main(page: ft.Page):
                 want_spin = (focus.x + 0.5) / pl.W * 2 * math.pi  # bring the event to the centre of the disc
                 want_tilt = (0.5 - (focus.y + 0.5) / pl.H) * math.pi
                 d_spin = (want_spin - spin + math.pi) % (2 * math.pi) - math.pi  # the short way round
-                d_tilt = max(-FOCUS_TILT, min(FOCUS_TILT, want_tilt)) - globe.tilt
+                d_tilt = max(-FOCUS_TILT, min(FOCUS_TILT, want_tilt)) - globe.aim
                 spin += d_spin * ease
-                globe.set_tilt(globe.tilt + d_tilt * ease)
+                globe.aim_tilt(globe.aim + d_tilt * ease)
                 spin_velocity = 0.0
                 camera_travelling = abs(d_spin) > 0.04 or abs(d_tilt) > 0.04
                 redraw.set()
                 continue
 
             if home_tilt is not None:  # drift back to the tilt the viewer had before the replay took over
-                d_tilt = home_tilt - globe.tilt
-                globe.set_tilt(globe.tilt + d_tilt * ease)
+                d_tilt = home_tilt - globe.aim
+                globe.aim_tilt(globe.aim + d_tilt * ease)
                 if abs(d_tilt) < 0.002:
                     home_tilt = None
                 redraw.set()
-            target = 0.0 if viewer_active else AUTO_SPIN
+            resting = page.web and not (playing or cinema) and now - last_activity > WEB_IDLE_SPIN
+            target = 0.0 if viewer_active or resting else AUTO_SPIN
             spin_velocity += (target - spin_velocity) * min(1.0, dt * 1.5)
             if abs(spin_velocity) > 0.002:
                 spin += spin_velocity * dt
@@ -554,14 +573,16 @@ async def main(page: ft.Page):
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         border=ft.Border.all(1, "#262b38"),
         content=ft.Stack([detector, cinema_caption], width=MAP_W, height=MAP_H),
-        animate_scale=ft.Animation(700, ft.AnimationCurve.EASE_OUT_CUBIC),
     )
 
-    def present(frame, town_lights=None):
-        """What the map view shows: the flat frame itself, or that frame wrapped around the globe."""
+    def present(frame, p: pl.Planet, town_lights=None):
+        """What the map view shows: the flat frame itself, or that frame wrapped around the globe.
+
+        Runs on a worker thread while the event loop carries on, so it reads each piece of shared state once."""
+        line, turned = slice_line if slicing else None, spin
         if view != "globe":
-            return draw_slice(frame) if slicing and slice_line is not None else frame
-        return globe.render(frame, spin, ~world.land, town_lights)
+            return draw_slice(frame, line) if line is not None else frame
+        return globe.render(frame, turned, ~p.land, town_lights)
 
     async def show(frame: np.ndarray):
         """Put a frame on the map view. The flat map stays PNG on the web too: JPEG smudges its crisp borders."""
@@ -574,7 +595,8 @@ async def main(page: ft.Page):
         await set_view_to(e.control.selected[0])
 
     async def set_view_to(name: str):
-        nonlocal view, spin_velocity
+        nonlocal view, spin_velocity, last_activity
+        last_activity = time.monotonic()
         if slicing and name == "globe":
             await toggle_slicing()  # cuts are drawn on the flat map only
         view = name
@@ -690,7 +712,10 @@ async def main(page: ft.Page):
 
     async def renderer():
         """Draws the latest requested state; drags, playback and the spinning globe just set `redraw`,
-        so frames coalesce. While only the globe turns, the flat frame is reused and the panels are left alone."""
+        so frames coalesce. While only the globe turns, the flat frame is reused and the panels are left alone.
+
+        The pixels are drawn on worker threads: every visitor shares this event loop, and a globe frame
+        takes about 10 ms, so drawing here would hold up everyone else's clicks and frames."""
         nonlocal owners, flat, lights, flat_key
         frame_due = 0.0  # on the web, the globe's next frame may not be drawn before this
         while True:
@@ -706,12 +731,13 @@ async def main(page: ft.Page):
             key = (generation, mode, selected, year)
             changed = key != flat_key
             if changed:
-                owners = p.history.owners_at(p, year)
-                flat, flat_key = pl.render(p, mode, selected, year=year), key
-                lights = gl.town_lights(p, owners)
+                drawn = await asyncio.to_thread(draw_flat, p, mode, selected, year)
+                if p is not world:
+                    continue  # a new world arrived meanwhile; its owners must not be this one's
+                (owners, flat, lights), flat_key = drawn, key
             frame_due = time.monotonic() + 1 / WEB_GLOBE_FPS
             try:
-                await show(present(flat, lights))
+                await show(await asyncio.to_thread(present, flat, p, lights))
             except RuntimeError:
                 return  # window closed
             except TimeoutError:
@@ -1144,9 +1170,8 @@ async def main(page: ft.Page):
         map_view.border, map_view.border_radius = None, 0
         cinema_caption.visible = True
         page.padding, page.bgcolor = 0, "#000000"
-        root.alignment = ft.MainAxisAlignment.CENTER  # the map in the middle of the screen
-        page.vertical_alignment = ft.MainAxisAlignment.CENTER
-        fit_cinema()
+        page.vertical_alignment = ft.MainAxisAlignment.CENTER  # the map in the middle of the screen
+        fit()
         if view != "globe":
             await set_view_to("globe")
         if not page.web:
@@ -1167,11 +1192,11 @@ async def main(page: ft.Page):
         await jump_to(year)  # stop the replay where it is
         for ctl in (toolbar, timeline, status, side):
             ctl.visible = True
-        map_view.border, map_view.border_radius, map_view.scale = ft.Border.all(1, "#262b38"), 12, 1.0
+        map_view.border, map_view.border_radius = ft.Border.all(1, "#262b38"), 12
         cinema_caption.visible = False
-        page.padding, page.bgcolor = 16, "#0b0d13"
-        root.alignment = ft.MainAxisAlignment.START
+        page.padding, page.bgcolor = PAGE_PAD, "#0b0d13"
         page.vertical_alignment = ft.MainAxisAlignment.START
+        fit()
         if before_cinema != view:
             await set_view_to(before_cinema)
         if not page.web:
@@ -1183,11 +1208,6 @@ async def main(page: ft.Page):
             pass
 
     cinema_close.on_click = leave_cinema
-
-    def fit_cinema():
-        """Scale the map view to fill the screen (its frames are upscaled; the labels scale with it)."""
-        if cinema and page.width and page.height:
-            map_view.scale = round(min(page.width / MAP_W, page.height / MAP_H), 3)
 
     async def cinema_loop(run: int):
         """Replay this world, linger on how it ends, then move on to a random new world, until cinema ends."""
@@ -1228,9 +1248,9 @@ async def main(page: ft.Page):
 
     cut_button.on_click = toggle_slicing
 
-    def draw_slice(frame: np.ndarray) -> np.ndarray:
+    def draw_slice(frame: np.ndarray, line) -> np.ndarray:
         """The cut being dragged, drawn on a copy of the map frame: gold once it is long enough."""
-        (y0, x0), (y1, x1) = slice_line
+        (y0, x0), (y1, x1) = line
         n = 2 * max(abs(y1 - y0), abs(x1 - x0), 1)
         ys = np.linspace(y0, y1, n).round().astype(int)
         xs = np.linspace(x0, x1, n).round().astype(int)
@@ -1308,6 +1328,7 @@ async def main(page: ft.Page):
         await toggle_slicing()  # done cutting
         section_host.content = section_view.control
         root.visible, section_host.visible = False, True
+        fit()
         page.update()
         section_view.start()
 
@@ -1316,7 +1337,7 @@ async def main(page: ft.Page):
         nonlocal section_view, section_cut, flat_key, hovered_cell
         if section_view is None:
             return
-        section_view.stop()
+        await section_view.stop()  # the slice holds still while what happened in it is read back
         counts = section_cut.write_back(world, section_view.world.mat) if world is not None else {}
         section_view = section_cut = None
         hovered_cell = None  # the cell hovered before the cut would overwrite the verdict below on the next frame
@@ -1329,6 +1350,7 @@ async def main(page: ft.Page):
         else:
             status.value = "Nothing in the slice changed the map."
         section_host.visible, section_host.content, root.visible = False, None, True
+        fit()
         page.update()
         redraw.set()
 
@@ -1370,7 +1392,8 @@ async def main(page: ft.Page):
     # ------------------------------------------------------------ world birth
 
     async def create_world(text: str):
-        nonlocal world, selected, generation, hovered_cell, year, owners, revealing, playing, territory
+        nonlocal world, selected, generation, hovered_cell, year, owners, revealing, playing, territory, last_activity
+        last_activity = time.monotonic()
         generation += 1
         mine = generation
         playing = False
@@ -1417,7 +1440,8 @@ async def main(page: ft.Page):
                 if mine != generation:
                     return
                 t = 1 - (i + 1) / REVEAL_FRAMES
-                await show(present(pl.render(p, mode, None, sea_rise=(1 - p.sea) * t * t)))
+                sea = (1 - p.sea) * t * t
+                await show(await asyncio.to_thread(lambda: present(pl.render(p, mode, None, sea_rise=sea), p)))
                 await asyncio.sleep(1 / 60)
         except RuntimeError:
             return  # window closed mid-animation
@@ -1431,7 +1455,7 @@ async def main(page: ft.Page):
         redraw.set()
 
     side = ft.Container(
-        width=PANEL_W, height=MAP_H + 150, padding=16, border_radius=12,
+        width=PANEL_W, height=SIDE_H, padding=16, border_radius=12,
         bgcolor="#141824", border=ft.Border.all(1, "#262b38"),
         content=panel,
     )
@@ -1447,19 +1471,47 @@ async def main(page: ft.Page):
                 await toggle_slicing()
             await leave_cinema()
 
-    def on_resize(e: ft.PageResizeEvent):
-        if cinema:
-            fit_cinema()
-            map_view.update()
-
+    # The layout has a natural size, fixed by the map's pixels; fit() scales it, from its top-left corner, to
+    # the window. `stage` takes the scaled size, so centring, scrolling and clicks all follow the picture.
     root = ft.Row(
         [
-            ft.Column([toolbar, map_view, timeline, status], spacing=10),
+            ft.Column([toolbar, map_view, timeline, status], spacing=10, width=MAP_W),
             side,
         ],
-        spacing=16,
+        left=0, top=0, width=MAP_W + 16 + PANEL_W,
+        spacing=16, run_spacing=16, wrap=True,  # the side panel wraps under the map when the row is map-wide
         vertical_alignment=ft.CrossAxisAlignment.START,
     )
+    section_host = ft.Container(visible=False, left=0, top=0, width=MAP_W)
+    stage = ft.Stack([root, section_host], clip_behavior=ft.ClipBehavior.NONE,
+                     width=MAP_W + 16 + PANEL_W, height=LAYOUT_H)
+
+    def fit():
+        """Fit the layout to the window. Wider than tall: map and panel side by side, shrunk to fit. Taller
+        than wide, like a phone: the panel under the map, fitted to the width, and the page scrolls.
+        Cinema: the map alone, grown or shrunk to fill the screen."""
+        if not (page.width and page.height):
+            return
+        pad = 0 if cinema else PAGE_PAD
+        avail_w, avail_h = page.width - 2 * pad, page.height - 2 * pad
+        portrait = avail_w < avail_h and not cinema
+        side.width = MAP_W if portrait else PANEL_W
+        root.width = MAP_W if portrait or cinema else MAP_W + 16 + PANEL_W
+        if cinema:
+            w, h = MAP_W, MAP_H
+        elif section_view is not None:
+            w, h = MAP_W, LAYOUT_H
+        else:
+            w, h = root.width, LAYOUT_H + (16 + SIDE_H if portrait else 0)
+        s = avail_w / w if portrait else min(avail_w / w, avail_h / h)
+        s = round(s if cinema else min(s, 1.0), 3)  # only cinema grows past the map's own pixels
+        root.scale, section_host.scale = (ft.Scale(s, alignment=ft.Alignment.TOP_LEFT) for _ in range(2))
+        stage.width, stage.height = w * s, h * s
+        page.scroll = ft.ScrollMode.AUTO if portrait else None
+
+    def on_resize(e: ft.PageResizeEvent):
+        fit()
+        page.update()
 
     def on_close():
         nonlocal session_closed
@@ -1470,8 +1522,8 @@ async def main(page: ft.Page):
     page.on_keyboard_event = on_key
     page.on_resize = on_resize
     page.on_close = on_close
-    section_host = ft.Container(visible=False, alignment=ft.Alignment.TOP_CENTER)
-    page.add(root, section_host)
+    fit()
+    page.add(stage)
     if not page.web:
         await page.window.center()
     try:
