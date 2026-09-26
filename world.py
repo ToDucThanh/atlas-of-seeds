@@ -1,4 +1,4 @@
-"""Seed 282 - type a number, get a world, and scrub through its history.
+"""Atlas - type a number or a word, get a world, and scrub through its history.
 
 Run with:  uv run python world.py [seed] [year] [realm] [--globe] [--replay]
 e.g.       uv run python world.py 282 1184 Aar     (opens that world in 1184, with Aar selected)
@@ -93,7 +93,7 @@ def format_population(n: int) -> str:
 
 
 async def main(page: ft.Page):
-    page.title = "Seed 282"
+    page.title = "Atlas"
     page.theme_mode = ft.ThemeMode.DARK
     page.theme = ft.Theme(color_scheme_seed="#5b8fd6")
     page.bgcolor = "#0b0d13"
@@ -652,7 +652,7 @@ async def main(page: ft.Page):
         ]
         return [
             ft.Text(p.name, size=30, weight=ft.FontWeight.BOLD),
-            ft.Text(f"Seed {p.seed} · Year {p.year}", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"World {p.seed} · Year {p.year}", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Divider(height=8),
             fact(ft.Icons.PUBLIC, "Land", f"{p.lore['land_pct']:.0f}% of the surface"),
             fact(ft.Icons.LANDSCAPE, "Highest", f"{p.peak_name}, {p.lore['peak_m']:,.0f} m"),
@@ -840,8 +840,8 @@ async def main(page: ft.Page):
         await create_world(seed_field.value)
 
     seed_field = ft.TextField(
-        value=DEFAULT_SEED, label="Seed", width=170, dense=True, prefix_icon=ft.Icons.PUBLIC,
-        on_submit=submit_seed,
+        value=DEFAULT_SEED, label="World", width=170, dense=True, prefix_icon=ft.Icons.PUBLIC,
+        tooltip="Any number or word makes its own world", on_submit=submit_seed,
     )
 
     def seed_stepper(delta: int):
@@ -872,11 +872,11 @@ async def main(page: ft.Page):
 
     toolbar = ft.Row(
         [
-            ft.Text("Seed", size=24, weight=ft.FontWeight.BOLD),
+            ft.Text("Atlas", size=24, weight=ft.FontWeight.BOLD),
             ft.Container(width=8),
-            ft.IconButton(ft.Icons.CHEVRON_LEFT, tooltip="Previous seed", on_click=seed_stepper(-1)),
+            ft.IconButton(ft.Icons.CHEVRON_LEFT, tooltip="Previous world", on_click=seed_stepper(-1)),
             seed_field,
-            ft.IconButton(ft.Icons.CHEVRON_RIGHT, tooltip="Next seed", on_click=seed_stepper(1)),
+            ft.IconButton(ft.Icons.CHEVRON_RIGHT, tooltip="Next world", on_click=seed_stepper(1)),
             ft.IconButton(ft.Icons.CASINO, tooltip="Random world", on_click=random_seed),
             progress,
             ft.Container(expand=True),
@@ -910,7 +910,7 @@ async def main(page: ft.Page):
             if mine == generation:  # keep showing the previous world
                 progress.visible = False
                 labels.opacity = globe_labels.opacity = 1 if world is not None else 0
-                status.value = f"Could not build a world from seed {text!r}: {ex!r}"
+                status.value = f"Could not build a world from {text!r}: {ex!r}"
                 page.update()
             return
         if mine != generation:
