@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "flet-audio>=1.0.1",
+    "flet-charts>=1.0.1",
     "flet[all]>=1.0.1",
     "numpy>=2.5.3",
 ]

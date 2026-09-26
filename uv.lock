@@ -626,6 +626,30 @@ all = [
 ]
 
 [[package]]
+name = "flet-audio"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3f/21/bcee0943e2c37605bbfc0a895b0860621024e1fef91523939d3747e1feb5/flet_audio-1.0.1.tar.gz", hash = "sha256:d7383b11ccccef9c13e67309542e783b7e8bca819073fee09a3c40d6bdf58dfb", size = 11716 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/bb/8baad4a079c79db80e2ea7efa94c4af98f1600922ea7b123124d6663c9ff/flet_audio-1.0.1-py3-none-any.whl", hash = "sha256:ff2315b9f7e56c06efd9af257885eacf326c8c2749bad3b22c17cf192bb04635", size = 13496 },
+]
+
+[[package]]
+name = "flet-charts"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/51/fbc999ea2e062b0a225fb150662ae3f2799e8b0a7713806e6f1ae691e754/flet_charts-1.0.1.tar.gz", hash = "sha256:5cba0ce191a9316b6acb8b98c3fb535eb5a48b3994138345cf4738956873f201", size = 55266 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/32/9772dbd79d95058db0edd249324f5e549fe31a82045232e70fbcc209fd02/flet_charts-1.0.1-py3-none-any.whl", hash = "sha256:d9ae6f053b195190388c5739f2fc2be666318e4050e6df6b46afb07e31822c83", size = 74786 },
+]
+
+[[package]]
 name = "flet-cli"
 version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -664,6 +688,8 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "flet", extra = ["all"] },
+    { name = "flet-audio" },
+    { name = "flet-charts" },
     { name = "numpy" },
 ]
 
@@ -675,6 +701,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "flet", extras = ["all"], specifier = ">=1.0.1" },
+    { name = "flet-audio", specifier = ">=1.0.1" },
+    { name = "flet-charts", specifier = ">=1.0.1" },
     { name = "numpy", specifier = ">=2.5.3" },
 ]
 

@@ -1,5 +1,8 @@
 """Atlas - type a number or a word, get a world, and scrub through its history.
 
+Replays have a soundtrack synthesised for each world (soundtrack.py), each panel charts how the realms
+rose and fell, and cinema mode fills the screen with the globe, replaying one world after another.
+
 Run with:  uv run python world.py [seed] [year] [realm] [--globe] [--replay]
 e.g.       uv run python world.py 282 1184 Aar     (opens that world in 1184, with Aar selected)
            uv run python world.py 282 --globe      (opens on the spinning globe)
@@ -13,10 +16,12 @@ import sys
 import time
 
 import flet as ft
+import flet_charts as fch
 import numpy as np
 
 import globe as gl
 import planet as pl
+import soundtrack as st
 
 SCALE = 2  # screen pixels per map cell
 MAP_W, MAP_H = pl.W * SCALE, pl.H * SCALE
@@ -35,6 +40,10 @@ FOCUS_TILT = 0.9  # the camera never tilts past this latitude (radians) to face 
 CAMERA_EASE = 2.6  # fraction of the remaining turn the camera covers per second
 TRAVEL_RATE = 0.03  # playback speed while the camera swings to the next event
 GLOBE_SLOW_MOTION = 0.1  # playback speed while the camera watches an event
+CINEMA_HOLD = 5.0  # seconds cinema mode lingers on a finished history before moving to another world
+RISE_H = 150  # height of the rise-and-fall chart
+PANEL_BG = (0x14, 0x18, 0x24)
+MUTED_KEY = "atlas.muted"
 MARKER_STYLE = {  # emoji, caption background (#AARRGGBB) (emoji that render in colour everywhere; ⚔ does not)
     "battle": ("💥", "#d8101318"),
     "war": ("🏹", "#e07a1d17"),
@@ -131,6 +140,14 @@ async def main(page: ft.Page):
     flat_key = None
     globe_items: list[tuple] = []  # (control, dx, dy, w, h, rule), most important first
     globe_anchor = (np.zeros(0), np.zeros(0))  # map cell (ys, xs) each globe label is pinned to
+    territory = None  # (years, percent[realm, sample]) of land each realm held, for the rise-and-fall chart
+    rise: dict = {}  # live parts of the open panel's rise-and-fall chart
+    cinema = False  # full-screen globe, replaying world after world
+    cinema_run = 0  # bumps on every enter/leave so only the latest cinema loop keeps going
+    before_cinema = "map"  # the view to return to
+    soundtrack = st.Soundtrack(page, wants_drone=lambda: playing or cinema)
+    wakelock = ft.Wakelock()
+    prefs = ft.SharedPreferences()
 
     # --------------------------------------------------------------- map view
 
@@ -465,11 +482,29 @@ async def main(page: ft.Page):
         scale=1.0,
         animate_scale=ft.Animation(1100, ft.AnimationCurve.EASE_IN_OUT_CUBIC),
     )
+    # Cinema mode's caption: frosted glass over the globe, with the world's name, the year and the latest news.
+    cine_name = ft.Text("", size=30, weight=ft.FontWeight.BOLD, color="#f4efe4")
+    cine_year = ft.Text("", size=18, weight=ft.FontWeight.BOLD, color="#ffd479", font_family="monospace")
+    cine_ticker = ft.Text("", size=13, italic=True, color="#e8dcc4", width=380, max_lines=2,
+                          overflow=ft.TextOverflow.ELLIPSIS)
+    cinema_close = ft.IconButton(ft.Icons.CLOSE, icon_size=16, icon_color="#a0ffffff", tooltip="Leave cinema (Esc)")
+    cinema_caption = ft.Container(
+        left=18, bottom=18, visible=False, blur=14, bgcolor="#5c121620", border_radius=16,
+        border=ft.Border.all(1, "#30ffffff"), padding=ft.Padding.only(left=18, right=8, top=8, bottom=14),
+        content=ft.Column(
+            [ft.Row([ft.Shimmer(content=cine_name, base_color="#f4efe4", highlight_color="#ffd479", period=4000),
+                     cinema_close],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN, width=390),
+             cine_year, cine_ticker],
+            spacing=2, tight=True,
+        ),
+    )
     map_view = ft.Container(
         border_radius=12,
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         border=ft.Border.all(1, "#262b38"),
-        content=detector,
+        content=ft.Stack([detector, cinema_caption], width=MAP_W, height=MAP_H),
+        animate_scale=ft.Animation(700, ft.AnimationCurve.EASE_OUT_CUBIC),
     )
 
     def present(frame, town_lights=None):
@@ -479,8 +514,12 @@ async def main(page: ft.Page):
         return globe.render(frame, spin, ~world.land, town_lights)
 
     async def set_view(e):
+        await set_view_to(e.control.selected[0])
+
+    async def set_view_to(name: str):
         nonlocal view, spin_velocity
-        view = e.control.selected[0]
+        view = name
+        view_picker.selected = [view]
         set_focus(None)
         labels.visible, globe_labels.visible = view == "map", view == "globe"
         detector.mouse_cursor = ft.MouseCursor.GRAB if view == "globe" else ft.MouseCursor.CLICK
@@ -532,14 +571,46 @@ async def main(page: ft.Page):
                 rate = TRAVEL_RATE if camera_travelling else GLOBE_SLOW_MOTION if focus is not None else 1
             else:
                 rate = SLOW_MOTION if world.history.busy(year) else 1
-            year = min(year + step * rate, slider.max)
+            before, year = year, min(year + step * rate, slider.max)
+            for m in world.history.markers:
+                if before < m.start <= year:
+                    soundtrack.cue(m.kind, marker_pan(m))
             slider.value = year
+            set_dock_progress((year - slider.min) / max(slider.max - slider.min, 1), year)
             redraw.set()
             await asyncio.sleep(1 / PLAY_FPS)
+        if run == play_run or not playing:  # finished or paused; a newer replay keeps its own badge
+            set_dock_progress(None)
         if mine == generation and run == play_run:
             playing = False
             play_button.icon = ft.Icons.PLAY_ARROW
             play_button.update()
+
+    def marker_pan(m) -> float:
+        """Where a marker sits left to right, from -1 to 1, so its sound comes from that side."""
+        if view != "globe":
+            return m.x / pl.W * 2 - 1
+        px, _, z = globe.project(np.array([m.y], np.float64), np.array([m.x], np.float64), spin)
+        return float(np.clip((px[0] - MAP_W / 2) / globe.radius, -1, 1)) if z[0] > 0 else 0.0
+
+    dock_progress: float | None = None
+
+    def set_dock_progress(value: float | None, at_year: float = 0):
+        """Show a replay on the app's icon: a progress bar on the Windows taskbar, and the year (to the decade)
+        as a badge, which is what the macOS Dock shows - it ignores the progress bar. None clears both."""
+        nonlocal dock_progress
+        badge = "" if value is None else str(int(at_year) // 10 * 10)  # "" clears it; None would leave it up
+        same_bar = value == dock_progress or (
+            value is not None and dock_progress is not None and abs(value - dock_progress) < 0.005)
+        if page.web or (same_bar and badge == page.window.badge_label):
+            return
+        dock_progress = value
+        page.window.progress_bar = -1 if value is None else round(value, 3)  # below 0 hides the bar
+        page.window.badge_label = badge
+        try:
+            page.window.update()
+        except RuntimeError:
+            pass  # window closed
 
     play_button = ft.IconButton(ft.Icons.PLAY_ARROW, tooltip="Replay history", on_click=toggle_play)
     slider = ft.Slider(min=0, max=1, value=1, expand=True, on_change=on_slide)
@@ -596,9 +667,12 @@ async def main(page: ft.Page):
                 active = m.start <= year < m.end
                 ctl.opacity, ctl.scale = (1.0, 1.0) if active else (0.0, 0.6)
             update_dynasty()
+            for point in rise.get("cursor", ()):
+                point.x = year
             year_text.value = f"Year {int(year)}"
             latest = p.history.latest_event(year)
             ticker_year.value, ticker.value = (str(latest[0]), latest[1]) if latest else ("", "Before recorded history.")
+            cine_year.value, cine_ticker.value = f"Year {int(year)}", ticker.value
             if hovered_cell is not None:
                 status.value = p.describe_cell(*hovered_cell, owners)
             try:
@@ -609,6 +683,100 @@ async def main(page: ft.Page):
     # ------------------------------------------------------------- side panel
 
     panel = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
+    panel_shown = 0  # bumps on every new panel, so only the latest fade-in runs
+
+    def show_panel(controls: list[ft.Control]):
+        """Swap the side panel's contents and fade them in; the caller's next update shows them.
+
+        Not an AnimatedSwitcher: that re-ran its fade on every update inside it, so the panel flickered
+        all through a replay (the ruler card follows the year) and whenever the chart's readout changed."""
+        nonlocal panel_shown
+        panel.controls = controls
+        panel.animate_opacity, panel.opacity = None, 0.0
+        panel_shown += 1
+        spawn(fade_in_panel(panel_shown))
+
+    async def fade_in_panel(shown: int):
+        await asyncio.sleep(0.03)  # let the hidden contents arrive first
+        if shown != panel_shown:
+            return
+        panel.animate_opacity, panel.opacity = ft.Animation(280, ft.AnimationCurve.EASE_OUT), 1.0
+        try:
+            panel.update()
+        except RuntimeError:
+            pass  # window closed
+
+    def blend(rgb, t: float, to=PANEL_BG) -> str:
+        return hex_color([c + (d - c) * t for c, d in zip(rgb, to)])
+
+    def rise_chart(p: pl.Planet, highlight: int | None = None) -> list[ft.Control]:
+        """Every realm's share of the land over the whole history, stacked oldest at the bottom.
+
+        A line marks the timeline's year; hover to read a year, click or drag to travel to it.
+        With `highlight`, that realm keeps its colour and the rest fade back."""
+        years, share = territory
+        realms = [(k.id, k.name, k.color, k.lore["founded"]) for k in p.kingdoms]
+        realms += [(r.id, r.name, r.color, r.founded) for r in p.history.lost]
+        order = sorted(realms, key=lambda r: r[3])
+        stacked = np.cumsum(share[[r[0] for r in order]], axis=0)
+        xs = [round(float(y), 1) for y in years]
+        bands = []
+        for level in reversed(range(len(order))):  # top band first, so each lower band paints over its fill
+            rid, _, color, _ = order[level]
+            dim = 0.0 if highlight in (None, rid) else 0.72
+            top = level == len(order) - 1
+            bands.append(fch.LineChartData(
+                # the readout below the chart replaces tooltips, and only the top band marks the hovered year
+                points=[fch.LineChartDataPoint(x, round(float(y), 2), show_tooltip=False)
+                        for x, y in zip(xs, stacked[level])],
+                color=blend(color, 0.35, (255, 255, 255)) if dim == 0 else blend(color, dim),
+                below_line_bgcolor=blend(color, dim), stroke_width=1, point=False, selected_point=False,
+                selected_below_line=fch.ChartPointLine(color="#90ffffff", width=1) if top else False,
+            ))
+        cursor = [fch.LineChartDataPoint(year, y, show_tooltip=False) for y in (0, 100)]
+        bands.append(fch.LineChartData(points=cursor, color="#f0ffffff", stroke_width=1.5, point=False,
+                                       selected_point=False, selected_below_line=False))
+        rise.clear()
+        rise["cursor"] = cursor
+
+        hint = "Share of the land each realm held · click to travel"
+        readout = ft.Text(hint, size=11, color=ft.Colors.ON_SURFACE_VARIANT, no_wrap=True,
+                          overflow=ft.TextOverflow.ELLIPSIS)
+        span = xs[-1] - xs[0]
+        tick = next(s for s in (50, 100, 200, 250, 500, 1000, 2000) if span / s <= 5)
+        ticks = range(int(math.ceil(xs[0] / tick) * tick), int(xs[-1]) + 1, tick)
+
+        async def on_event(e: fch.LineChartEvent):
+            if e.type == fch.ChartEventType.POINTER_EXIT:
+                readout.value = hint
+                readout.update()
+                return
+            i = next((s.spot_index for s in e.spots if s.spot_index >= 0 and s.bar_index < len(bands) - 1), None)
+            if i is None:
+                return
+            held = sorted(((share[rid, i], name) for rid, name, _, _ in realms), reverse=True)
+            readout.value = f"{int(years[i])} · " + " · ".join(f"{n} {v:.0f}%" for v, n in held[:3] if v >= 0.5)
+            readout.update()
+            if e.type in (fch.ChartEventType.TAP_UP, fch.ChartEventType.PAN_DOWN, fch.ChartEventType.PAN_UPDATE):
+                await jump_to(float(years[i]))
+
+        chart = fch.LineChart(
+            data_series=bands, min_x=xs[0], max_x=xs[-1], min_y=0, max_y=100, height=RISE_H,
+            tooltip=fch.LineChartTooltip(bgcolor="#00000000"),  # tooltip=None still shows some; the readout says it
+            interactive=True, animation=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
+            horizontal_grid_lines=fch.ChartGridLines(interval=25, color="#14ffffff", width=1),
+            left_axis=fch.ChartAxis(show_labels=False, label_size=0),
+            top_axis=fch.ChartAxis(show_labels=False, label_size=0),
+            right_axis=fch.ChartAxis(show_labels=False, label_size=0),
+            bottom_axis=fch.ChartAxis(
+                label_size=18, show_min=False, show_max=False,
+                labels=[fch.ChartAxisLabel(value=t, label=ft.Text(str(t), size=10, color=ft.Colors.ON_SURFACE_VARIANT))
+                        for t in ticks],
+            ),
+            on_event=on_event,
+        )
+        # Not wrapped in a clipping Container: with one, the first hover blanks everything below the chart.
+        return [heading("RISE AND FALL"), chart, readout]
 
     def heading(text: str) -> ft.Control:
         return ft.Text(text, size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY,
@@ -651,7 +819,8 @@ async def main(page: ft.Page):
             for r in p.history.lost
         ]
         return [
-            ft.Text(p.name, size=30, weight=ft.FontWeight.BOLD),
+            ft.Shimmer(content=ft.Text(p.name, size=30, weight=ft.FontWeight.BOLD), loop=1, period=1800,
+                       base_color="#f4efe4", highlight_color="#ffd479"),  # one sweep of gold as the world is named
             ft.Text(f"World {p.seed} · Year {p.year}", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Divider(height=8),
             fact(ft.Icons.PUBLIC, "Land", f"{p.lore['land_pct']:.0f}% of the surface"),
@@ -660,6 +829,7 @@ async def main(page: ft.Page):
             fact(ft.Icons.LOCATION_CITY, "Towns", str(len(p.towns))),
             fact(ft.Icons.HISTORY_EDU, "History", f"{p.year - p.history.start:,} years recorded"),
             ft.Divider(height=8),
+            *rise_chart(p),
             heading(f"{len(p.kingdoms)} REALMS"),
             *realms,
             *([heading("FALLEN REALMS"), *fallen] if fallen else []),
@@ -773,6 +943,7 @@ async def main(page: ft.Page):
             fact(ft.Icons.GROUPS, "People", format_population(lore["population"])),
             fact(ft.Icons.TEMPLE_BUDDHIST, "Faith", lore["faith"]),
             fact(ft.Icons.TERRAIN, "Lands", ", ".join(f"{pl.BIOME_NAMES[b].lower()} {s:.0%}" for b, s in share)),
+            *rise_chart(p, k.id),
             heading("EXPORTS"),
             ft.Row([ft.Chip(label=ft.Text(g, size=12), visual_density=ft.VisualDensity.COMPACT) for g in lore["exports"]],
                    wrap=True, spacing=6, run_spacing=6),
@@ -814,6 +985,7 @@ async def main(page: ft.Page):
                     f"Move the timeline before {r.fell} to see its old borders.",
                     size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.FilledTonalButton(f"Visit the year {r.fell - 1}", icon=ft.Icons.HISTORY, on_click=visit),
+            *rise_chart(p, r.id),
             heading(f"DYNASTY · {len(r.reigns)} RULERS"),
             *reign_rows,
         ]
@@ -826,11 +998,11 @@ async def main(page: ft.Page):
         if rid is None:
             chronicle_rows.clear()
             dynasty.clear()
-            panel.controls = overview_panel(world)
+            show_panel(overview_panel(world))
         elif rid < len(world.kingdoms):
-            panel.controls = kingdom_panel(world, world.kingdoms[rid])
+            show_panel(kingdom_panel(world, world.kingdoms[rid]))
         else:
-            panel.controls = lost_panel(world, world.history.lost[rid - len(world.kingdoms)])
+            show_panel(lost_panel(world, world.history.lost[rid - len(world.kingdoms)]))
         panel.update()
         redraw.set()
 
@@ -862,6 +1034,103 @@ async def main(page: ft.Page):
         mode = e.control.selected[0]
         redraw.set()
 
+    sound_button = ft.IconButton(ft.Icons.VOLUME_UP, tooltip="Mute")
+
+    def show_sound_state():
+        sound_button.icon = ft.Icons.VOLUME_OFF if soundtrack.muted else ft.Icons.VOLUME_UP
+        sound_button.tooltip = "Unmute" if soundtrack.muted else "Mute"
+
+    async def toggle_sound():
+        soundtrack.set_muted(not soundtrack.muted)
+        show_sound_state()
+        sound_button.update()
+        try:
+            await asyncio.wait_for(prefs.set(MUTED_KEY, soundtrack.muted), st.CALL_TIMEOUT)
+        except Exception:  # noqa: BLE001 - remembering the choice is a nicety
+            pass
+
+    sound_button.on_click = toggle_sound
+
+    # Cinema: the globe fills the screen and replays one world's history after another, until Esc.
+
+    async def enter_cinema():
+        nonlocal cinema, cinema_run, before_cinema
+        if cinema or world is None:
+            return
+        cinema, before_cinema = True, view
+        cinema_run += 1
+        await jump_to(year)  # stop any replay; the cinema loop starts its own
+        for ctl in (toolbar, timeline, status, side):
+            ctl.visible = False
+        map_view.border, map_view.border_radius = None, 0
+        cinema_caption.visible = True
+        page.padding, page.bgcolor = 0, "#000000"
+        root.alignment = ft.MainAxisAlignment.CENTER  # the map in the middle of the screen
+        page.vertical_alignment = ft.MainAxisAlignment.CENTER
+        fit_cinema()
+        if view != "globe":
+            await set_view_to("globe")
+        if not page.web:
+            page.window.full_screen = True
+        page.update()
+        try:
+            await asyncio.wait_for(wakelock.enable(), st.CALL_TIMEOUT)
+        except Exception:  # noqa: BLE001 - staying awake is best effort
+            pass
+        spawn(cinema_loop(cinema_run))
+
+    async def leave_cinema():
+        nonlocal cinema, cinema_run
+        if not cinema:
+            return
+        cinema = False
+        cinema_run += 1
+        await jump_to(year)  # stop the replay where it is
+        for ctl in (toolbar, timeline, status, side):
+            ctl.visible = True
+        map_view.border, map_view.border_radius, map_view.scale = ft.Border.all(1, "#262b38"), 12, 1.0
+        cinema_caption.visible = False
+        page.padding, page.bgcolor = 16, "#0b0d13"
+        root.alignment = ft.MainAxisAlignment.START
+        page.vertical_alignment = ft.MainAxisAlignment.START
+        if before_cinema != view:
+            await set_view_to(before_cinema)
+        if not page.web:
+            page.window.full_screen = False
+        page.update()
+        try:
+            await asyncio.wait_for(wakelock.disable(), st.CALL_TIMEOUT)
+        except Exception:  # noqa: BLE001
+            pass
+
+    cinema_close.on_click = leave_cinema
+
+    def fit_cinema():
+        """Scale the map view to fill the screen (its frames are upscaled; the labels scale with it)."""
+        if cinema and page.width and page.height:
+            map_view.scale = round(min(page.width / MAP_W, page.height / MAP_H), 3)
+
+    async def cinema_loop(run: int):
+        """Replay this world, linger on how it ends, then move on to a random new world, until cinema ends."""
+        first = True
+        while cinema and run == cinema_run:
+            if not first:
+                await asyncio.sleep(CINEMA_HOLD)
+                if not (cinema and run == cinema_run):
+                    return
+                await random_seed()
+            first = False
+            await asyncio.sleep(1.5)  # a moment on the new world before its history begins
+            if not (cinema and run == cinema_run) or world is None or revealing:
+                return
+            await jump_to(slider.max)  # playback starts over from the first year
+            await toggle_play()  # returns once the replay ends, or is stopped
+
+    def spawn(coro):
+        task = asyncio.create_task(coro)
+        BACKGROUND_TASKS.add(task)  # the event loop only holds weak references to tasks
+        task.add_done_callback(BACKGROUND_TASKS.discard)
+
     view_picker = ft.SegmentedButton(
         selected=[view], show_selected_icon=False, on_change=set_view,
         segments=[
@@ -880,6 +1149,9 @@ async def main(page: ft.Page):
             ft.IconButton(ft.Icons.CASINO, tooltip="Random world", on_click=random_seed),
             progress,
             ft.Container(expand=True),
+            sound_button,
+            ft.IconButton(ft.Icons.SLIDESHOW, tooltip="Cinema: full-screen globe, replaying world after world",
+                          on_click=enter_cinema),
             view_picker,
             ft.SegmentedButton(
                 selected=["terrain"], show_selected_icon=False, on_change=set_mode,
@@ -895,7 +1167,7 @@ async def main(page: ft.Page):
     # ------------------------------------------------------------ world birth
 
     async def create_world(text: str):
-        nonlocal world, selected, generation, hovered_cell, year, owners, revealing, playing
+        nonlocal world, selected, generation, hovered_cell, year, owners, revealing, playing, territory
         generation += 1
         mine = generation
         playing = False
@@ -904,8 +1176,14 @@ async def main(page: ft.Page):
         labels.opacity = globe_labels.opacity = 0
         page.update()
 
+        seed = pl.seed_from_text(text)
+
+        def build():
+            p = pl.generate(seed)
+            return p, p.history.territory(p)
+
         try:
-            p = await asyncio.to_thread(pl.generate, pl.seed_from_text(text))
+            (p, land_held), drone = await asyncio.gather(asyncio.to_thread(build), soundtrack.drone_for(seed))
         except Exception as ex:
             if mine == generation:  # keep showing the previous world
                 progress.visible = False
@@ -915,7 +1193,9 @@ async def main(page: ft.Page):
             return
         if mine != generation:
             return
-        world, selected, hovered_cell, revealing = p, None, None, True
+        world, selected, hovered_cell, revealing, territory = p, None, None, True, land_held
+        soundtrack.set_drone(drone)
+        cine_name.value = p.name
         year = float(p.year)
         owners = p.kingdom_map
         slider.min, slider.max, slider.value = p.history.start, p.year, p.year
@@ -923,9 +1203,10 @@ async def main(page: ft.Page):
         build_globe_labels(p)
         chronicle_rows.clear()
         dynasty.clear()
-        panel.controls = overview_panel(p)
+        show_panel(overview_panel(p))
         status.value = "Hover to explore · click a realm for its history"
         page.update()
+        soundtrack.reveal()
 
         # The oceans drain away to reveal the land.
         try:
@@ -942,22 +1223,40 @@ async def main(page: ft.Page):
         progress.visible = False
         redraw.set()
 
-    page.add(
-        ft.Row(
-            [
-                ft.Column([toolbar, map_view, timeline, status], spacing=10),
-                ft.Container(
-                    width=PANEL_W, height=MAP_H + 150, padding=16, border_radius=12,
-                    bgcolor="#141824", border=ft.Border.all(1, "#262b38"),
-                    content=panel,
-                ),
-            ],
-            spacing=16,
-            vertical_alignment=ft.CrossAxisAlignment.START,
-        )
+    side = ft.Container(
+        width=PANEL_W, height=MAP_H + 150, padding=16, border_radius=12,
+        bgcolor="#141824", border=ft.Border.all(1, "#262b38"),
+        content=panel,
     )
+
+    async def on_key(e: ft.KeyboardEvent):
+        if e.key == "Escape":
+            await leave_cinema()
+
+    def on_resize(e: ft.PageResizeEvent):
+        if cinema:
+            fit_cinema()
+            map_view.update()
+
+    root = ft.Row(
+        [
+            ft.Column([toolbar, map_view, timeline, status], spacing=10),
+            side,
+        ],
+        spacing=16,
+        vertical_alignment=ft.CrossAxisAlignment.START,
+    )
+    page.on_keyboard_event = on_key
+    page.on_resize = on_resize
+    page.add(root)
     if not page.web:
         await page.window.center()
+    try:
+        soundtrack.set_muted(bool(await asyncio.wait_for(prefs.get(MUTED_KEY), st.CALL_TIMEOUT)))
+    except Exception:  # noqa: BLE001 - no stored choice, or no storage: sound stays on
+        pass
+    show_sound_state()
+    await soundtrack.load()
     renderer_task = asyncio.create_task(renderer())
     for task in (renderer_task, asyncio.create_task(spinner())):
         BACKGROUND_TASKS.add(task)  # the event loop only holds weak references to tasks

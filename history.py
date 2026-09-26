@@ -74,6 +74,19 @@ class History:
         own[before] = self.prior_owner[before]
         return own
 
+    def territory(self, p: pl.Planet, samples: int = 120) -> tuple[np.ndarray, np.ndarray]:
+        """How much of the world's land each realm held over time: (years, percent[realm, sample]).
+
+        Realms are indexed by id, living then fallen; land nobody holds is left out."""
+        years = np.linspace(self.start, self.end, samples)
+        realms = len(p.kingdoms) + len(self.lost)
+        land = p.land
+        share = np.empty((realms, samples))
+        for i, year in enumerate(years):
+            held = self.owners_at(p, year)[land]
+            share[:, i] = np.bincount(held[held >= 0], minlength=realms)[:realms]
+        return years, share * (100 / max(int(land.sum()), 1))
+
     def contested_at(self, year: float) -> np.ndarray:
         return self.contested_since <= year
 
