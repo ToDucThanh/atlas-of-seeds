@@ -1,9 +1,10 @@
 [project]
-name = "flet-first-try"
+name = "atlas-of-seeds"
 version = "0.1.0"
-description = "Add your description here"
+description = "Type a number or a word, get a world, and scrub through its history on a spinning globe."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "flet-audio>=1.0.1",
     "flet-charts>=1.0.1",
