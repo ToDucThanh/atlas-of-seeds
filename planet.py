@@ -17,9 +17,10 @@ W, H = 480, 300
 # ---------------------------------------------------------------------- biomes
 
 (OCEAN, SEA_ICE, ICE, TUNDRA, TAIGA, FOREST, GRASSLAND, DESERT, SAVANNA, RAINFOREST, MOUNTAIN) = range(11)
+BURNT = 11  # never generated: land burned in a cross-section (section.py)
 BIOME_NAMES = [
     "Ocean", "Sea ice", "Glacier", "Tundra", "Taiga", "Temperate forest",
-    "Grassland", "Desert", "Savanna", "Rainforest", "Mountains",
+    "Grassland", "Desert", "Savanna", "Rainforest", "Mountains", "Burnt land",
 ]
 BIOME_COLORS = np.array(
     [
@@ -34,10 +35,11 @@ BIOME_COLORS = np.array(
         (186, 172, 98),  # savanna
         (40, 112, 58),  # rainforest
         (128, 116, 104),  # mountains
+        (58, 46, 40),  # burnt land
     ],
     np.float32,
 )
-HABITABILITY = np.array([0, 0, 0, 0.1, 0.4, 0.85, 1.0, 0.15, 0.7, 0.5, 0.1], np.float32)
+HABITABILITY = np.array([0, 0, 0, 0.1, 0.4, 0.85, 1.0, 0.15, 0.7, 0.5, 0.1, 0.05], np.float32)
 
 SHALLOW = np.array((64, 132, 170), np.float32)
 DEEP = np.array((14, 32, 66), np.float32)

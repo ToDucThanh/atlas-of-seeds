@@ -10,11 +10,11 @@ while each row's work is fully vectorised.
 
 import numpy as np
 
-EMPTY, SAND, WATER, WALL, PLANT, FIRE, OIL, SMOKE, STEAM = range(9)
-N_MATERIALS = 9
+EMPTY, SAND, WATER, WALL, PLANT, FIRE, OIL, SMOKE, STEAM, STONE, DIRT = range(11)
+N_MATERIALS = 11  # stone and dirt are the ground of a world's cross-section (section.py)
 
 # Heavier things sink through lighter ones; 100 = immovable.
-DENSITY = np.array([0, 3, 2, 100, 100, 100, 1, 0, 0], dtype=np.int16)
+DENSITY = np.array([0, 3, 2, 100, 100, 100, 1, 0, 0, 100, 100], dtype=np.int16)
 FALLS = np.zeros(N_MATERIALS, bool)
 FALLS[[SAND, WATER, OIL]] = True
 LIQUID = np.zeros(N_MATERIALS, bool)
@@ -34,11 +34,13 @@ COLORS = np.array(
         (92, 60, 40),  # oil
         (90, 90, 96),  # smoke
         (200, 220, 240),  # steam
+        (104, 98, 92),  # stone
+        (112, 82, 54),  # dirt
     ],
     dtype=np.int16,
 )
 # How strongly the per-cell noise byte tints each material.
-SHADE = np.array([0, 22, 10, 14, 30, 0, 10, 0, 0], dtype=np.int16)
+SHADE = np.array([0, 22, 10, 14, 30, 0, 10, 0, 0, 26, 24], dtype=np.int16)
 
 
 def _fire_lut() -> np.ndarray:

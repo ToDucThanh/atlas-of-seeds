@@ -2,11 +2,13 @@
 
 Replays have a soundtrack synthesised for each world (soundtrack.py), each panel charts how the realms
 rose and fell, and cinema mode fills the screen with the globe, replaying one world after another.
+The scissors cut a cross-section: drag across the map and that slice opens in the falling-sand sandbox.
 
-Run with:  uv run python world.py [seed] [year] [realm] [--globe] [--replay]
+Run with:  uv run python world.py [seed] [year] [realm] [--globe] [--replay] [--cut=Y0,X0,Y1,X1]
 e.g.       uv run python world.py 282 1184 Aar     (opens that world in 1184, with Aar selected)
            uv run python world.py 282 --globe      (opens on the spinning globe)
            uv run python world.py 282 --globe --replay   (replays history, the camera following each war)
+           uv run python world.py 282 --cut=79,123,53,272    (a cross-section between two map cells)
 """
 
 import asyncio
@@ -21,6 +23,9 @@ import numpy as np
 
 import globe as gl
 import planet as pl
+import sand
+import sandbox_ui
+import section as sec
 import soundtrack as st
 
 SCALE = 2  # screen pixels per map cell
@@ -44,6 +49,11 @@ CINEMA_HOLD = 5.0  # seconds cinema mode lingers on a finished history before mo
 RISE_H = 150  # height of the rise-and-fall chart
 PANEL_BG = (0x14, 0x18, 0x24)
 MUTED_KEY = "atlas.muted"
+SECTION_W, SECTION_H = 240, 150  # sandbox cells in a cross-section: the same 960 x 600 pixels as the map
+SECTION_MATERIALS = [sand.SAND, sand.WATER, sand.PLANT, sand.FIRE, sand.EMPTY]  # what a slice offers; the map
+# learns what each did (heaped or dug ground, floods, planting, burning) when the slice closes
+MIN_CUT = 12  # map cells; a shorter drag doesn't cut a cross-section
+CUT_HINT = "✂ Drag a line across the map to cut a cross-section (Esc cancels)"
 MARKER_STYLE = {  # emoji, caption background (#AARRGGBB) (emoji that render in colour everywhere; ⚔ does not)
     "battle": ("💥", "#d8101318"),
     "war": ("🏹", "#e07a1d17"),
@@ -145,6 +155,10 @@ async def main(page: ft.Page):
     cinema = False  # full-screen globe, replaying world after world
     cinema_run = 0  # bumps on every enter/leave so only the latest cinema loop keeps going
     before_cinema = "map"  # the view to return to
+    slicing = False  # waiting for a drag across the map to cut a cross-section
+    slice_line: tuple[tuple[int, int], tuple[int, int]] | None = None  # map cells (y, x) at each end of the drag
+    section_view: sandbox_ui.SandboxView | None = None  # the open cross-section, if any
+    section_cut: sec.Section | None = None  # ...the slice it was cut as, to compare against when it closes
     soundtrack = st.Soundtrack(page, wants_drone=lambda: playing or cinema)
     wakelock = ft.Wakelock()
     prefs = ft.SharedPreferences()
@@ -353,17 +367,18 @@ async def main(page: ft.Page):
 
     def on_hover(e):
         nonlocal hovered_cell, last_hover
+        ft.context.disable_auto_update()  # frequent; it updates the status line itself when that changes
         last_hover = time.monotonic()
         cell = cell_at(e.local_position)
         if world is None or owners is None or cell is None or cell == hovered_cell:
             return
         hovered_cell = cell
-        status.value = world.describe_cell(*cell, owners)
+        status.value = (CUT_HINT + " · " if slicing else "") + world.describe_cell(*cell, owners)
         status.update()
 
     async def on_tap(e):
         cell = cell_at(e.local_position)
-        if world is None or owners is None or cell is None:
+        if world is None or owners is None or cell is None or slicing:
             return
         rid = int(owners[cell])
         await select(rid if rid >= 0 and rid != selected else None)
@@ -371,14 +386,26 @@ async def main(page: ft.Page):
     # Globe: drag to turn it (up and down tilts toward a pole), flick to spin it, hover to stop it.
 
     def drag_start(e: ft.DragStartEvent):
-        nonlocal dragging, drag_last
+        nonlocal dragging, drag_last, slice_line
+        if slicing:
+            cell = cell_at(e.local_position)
+            slice_line = (cell, cell) if cell is not None else None
+            redraw.set()
+            return
         if view == "globe":
             dragging, drag_last = True, (e.local_position.x, e.local_position.y, time.monotonic())
             detector.mouse_cursor = ft.MouseCursor.GRABBING
             detector.update()
 
     def drag_update(e: ft.DragUpdateEvent):
-        nonlocal spin, spin_velocity, drag_last, last_hover, home_tilt
+        nonlocal spin, spin_velocity, drag_last, last_hover, home_tilt, slice_line
+        ft.context.disable_auto_update()  # frequent; the renderer draws the result
+        if slicing and slice_line is not None:
+            x = min(max(e.local_position.x, 0), MAP_W - 1)
+            y = min(max(e.local_position.y, 0), MAP_H - 1)
+            slice_line = (slice_line[0], (int(y // SCALE), int(x // SCALE)))
+            redraw.set()
+            return
         if not dragging:
             return
         x, y, now = e.local_position.x, e.local_position.y, time.monotonic()
@@ -394,6 +421,9 @@ async def main(page: ft.Page):
 
     def drag_end(e: ft.DragEndEvent | None = None):
         nonlocal dragging, spin_velocity
+        if slicing and slice_line is not None:
+            spawn(open_section())
+            return
         if not dragging:
             return
         dragging = False
@@ -405,6 +435,7 @@ async def main(page: ft.Page):
 
     def mouse_left():
         nonlocal last_hover
+        ft.context.disable_auto_update()
         last_hover = 0.0
 
     def set_focus(m):
@@ -510,7 +541,7 @@ async def main(page: ft.Page):
     def present(frame, town_lights=None):
         """What the map view shows: the flat frame itself, or that frame wrapped around the globe."""
         if view != "globe":
-            return frame
+            return draw_slice(frame) if slicing and slice_line is not None else frame
         return globe.render(frame, spin, ~world.land, town_lights)
 
     async def set_view(e):
@@ -635,8 +666,8 @@ async def main(page: ft.Page):
         while True:
             await redraw.wait()
             redraw.clear()
-            if world is None or revealing:
-                continue
+            if world is None or revealing or section_view is not None:
+                continue  # (while a cross-section is open the map's image is off the page)
             p = world
             key = (generation, mode, selected, year)
             changed = key != flat_key
@@ -1057,6 +1088,8 @@ async def main(page: ft.Page):
         nonlocal cinema, cinema_run, before_cinema
         if cinema or world is None:
             return
+        if slicing:
+            await toggle_slicing()
         cinema, before_cinema = True, view
         cinema_run += 1
         await jump_to(year)  # stop any replay; the cinema loop starts its own
@@ -1131,6 +1164,127 @@ async def main(page: ft.Page):
         BACKGROUND_TASKS.add(task)  # the event loop only holds weak references to tasks
         task.add_done_callback(BACKGROUND_TASKS.discard)
 
+    # Cross-sections: drag a line across the map, and that slice of the world opens in the sandbox.
+
+    cut_button = ft.IconButton(ft.Icons.CONTENT_CUT, tooltip="Cut a cross-section: drag a line across the map")
+
+    async def toggle_slicing():
+        nonlocal slicing, slice_line
+        slicing, slice_line = not slicing, None
+        if slicing and view == "globe":
+            await set_view_to("map")
+        cut_button.icon_color = ft.Colors.PRIMARY if slicing else None
+        cut_button.bgcolor = "#26324a" if slicing else None
+        detector.mouse_cursor = ft.MouseCursor.PRECISE if slicing else ft.MouseCursor.CLICK
+        status.value = CUT_HINT if slicing else "Hover to explore · click a realm for its history"
+        page.update()
+        redraw.set()
+
+    cut_button.on_click = toggle_slicing
+
+    def draw_slice(frame: np.ndarray) -> np.ndarray:
+        """The cut being dragged, drawn on a copy of the map frame: gold once it is long enough."""
+        (y0, x0), (y1, x1) = slice_line
+        n = 2 * max(abs(y1 - y0), abs(x1 - x0), 1)
+        ys = np.linspace(y0, y1, n).round().astype(int)
+        xs = np.linspace(x0, x1, n).round().astype(int)
+        long_enough = max(abs(y1 - y0), abs(x1 - x0)) >= MIN_CUT
+        out = frame.copy()
+        for dy in (-1, 0, 1):  # a dark halo so the line reads on ice and desert alike
+            for dx in (-1, 0, 1):
+                out[np.clip(ys + dy, 0, pl.H - 1), np.clip(xs + dx, 0, pl.W - 1), :3] = (16, 18, 26)
+        out[ys, xs, :3] = (255, 212, 121) if long_enough else (200, 200, 210)
+        for y, x in ((y0, x0), (y1, x1)):
+            out[max(y - 1, 0):y + 2, max(x - 1, 0):x + 2, :3] = (255, 244, 220)
+        return out
+
+    def realm_strip(p: pl.Planet, cut: sec.Section) -> ft.Control:
+        """Who holds the land along the cut, as a band of realm colours over the sandbox."""
+        realms = list(p.kingdoms) + list(p.history.lost)
+        runs, start = [], 0
+        for col in range(1, len(cut.owners) + 1):
+            if col == len(cut.owners) or cut.owners[col] != cut.owners[start]:
+                runs.append((int(cut.owners[start]), col - start))
+                start = col
+        cells = []
+        for rid, n in runs:
+            w = n * sandbox_ui.CELL_SIZE
+            realm = realms[rid] if rid >= 0 else None
+            name = realm.name if realm is not None and w > len(realm.name) * 7 + 12 else ""
+            cells.append(ft.Container(
+                width=w, height=20, alignment=ft.Alignment.CENTER, tooltip=realm.title if realm else None,
+                bgcolor=blend(realm.color, 0.35) if realm else "#161a26",
+                content=ft.Text(name, size=10, weight=ft.FontWeight.BOLD, color="#f4efe4", no_wrap=True,
+                                style=ft.TextStyle(letter_spacing=1.5)) if name else None,
+            ))
+        return ft.Container(ft.Row(cells, spacing=0), border_radius=6, clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            width=SECTION_W * sandbox_ui.CELL_SIZE)
+
+    def section_labels(cut: sec.Section) -> list[ft.Control]:
+        """Town and peak names pinned above where they stand in the sandbox."""
+        out = []
+        for lb in cut.labels:
+            capital = lb.kind == "capital"
+            text = f"★ {lb.text}" if capital else lb.text
+            size = 11 if capital or lb.kind in ("city", "peak") else 10
+            w = len(text) * size * 0.62 + 8
+            left = min(max(lb.col * sandbox_ui.CELL_SIZE - w / 2, 0), SECTION_W * sandbox_ui.CELL_SIZE - w)
+            top = max(lb.row * sandbox_ui.CELL_SIZE - 20, 0)
+            out.append(ft.Container(
+                left=left, top=top, width=w, height=16, alignment=ft.Alignment.CENTER,
+                content=label_text(text, size, "#ffd479" if capital else "#f4efe4",
+                                   ft.FontWeight.BOLD if capital else ft.FontWeight.W_500),
+            ))
+        return out
+
+    async def open_section():
+        nonlocal slicing, slice_line, section_view, section_cut
+        a, b = slice_line
+        if max(abs(a[0] - b[0]), abs(a[1] - b[1])) < MIN_CUT or world is None:
+            slice_line = None  # too short to be a cut; keep waiting for one
+            redraw.set()
+            return
+        p, held = world, owners
+        await jump_to(year)  # stop any replay
+        cut = await asyncio.to_thread(sec.cut, p, a, b, held, SECTION_W, SECTION_H)
+        if p is not world:
+            return
+        terrain = sand.World(SECTION_W, SECTION_H, seed=p.seed)
+        cut.load_into(terrain)
+        back = ft.IconButton(ft.Icons.ARROW_BACK, tooltip="Back to the map (Esc)", on_click=close_section)
+        section_view = sandbox_ui.SandboxView(
+            page, terrain, f"{cut.start_name} → {cut.end_name}", reset=("Reset", lambda: cut.load_into(terrain)),
+            subtitle=f"a slice through {p.name} · what you do here changes the map",
+            leading=back, header=realm_strip(p, cut), overlay=section_labels(cut), material=sand.FIRE,
+            materials=SECTION_MATERIALS, on_step=cut.tend,
+        )
+        section_cut = cut
+        await toggle_slicing()  # done cutting
+        section_host.content = section_view.control
+        root.visible, section_host.visible = False, True
+        page.update()
+        section_view.start()
+
+    async def close_section():
+        """Back to the map, carrying what happened in the slice onto it."""
+        nonlocal section_view, section_cut, flat_key
+        if section_view is None:
+            return
+        section_view.stop()
+        counts = section_cut.write_back(world, section_view.world.mat) if world is not None else {}
+        section_view = section_cut = None
+        if counts:
+            flat_key = None  # the terrain changed: render it afresh
+            words = {"burned": "burned", "flooded": "flooded", "new land": "risen from the sea",
+                     "greened": "planted", "raised": "heaped up", "lowered": "dug out"}
+            status.value = f"{world.name} remembers: " + " · ".join(
+                f"{n} {'cell' if n == 1 else 'cells'} {words[k]}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+        else:
+            status.value = "Nothing in the slice changed the map."
+        section_host.visible, section_host.content, root.visible = False, None, True
+        page.update()
+        redraw.set()
+
     view_picker = ft.SegmentedButton(
         selected=[view], show_selected_icon=False, on_change=set_view,
         segments=[
@@ -1149,6 +1303,7 @@ async def main(page: ft.Page):
             ft.IconButton(ft.Icons.CASINO, tooltip="Random world", on_click=random_seed),
             progress,
             ft.Container(expand=True),
+            cut_button,
             sound_button,
             ft.IconButton(ft.Icons.SLIDESHOW, tooltip="Cinema: full-screen globe, replaying world after world",
                           on_click=enter_cinema),
@@ -1162,6 +1317,7 @@ async def main(page: ft.Page):
             ),
         ],
         width=MAP_W,
+        spacing=4,  # nine buttons and two pickers share the map's width
     )
 
     # ------------------------------------------------------------ world birth
@@ -1230,7 +1386,14 @@ async def main(page: ft.Page):
     )
 
     async def on_key(e: ft.KeyboardEvent):
-        if e.key == "Escape":
+        if section_view is not None:
+            if e.key == "Escape":
+                await close_section()
+            else:
+                section_view.on_key(e)
+        elif e.key == "Escape":
+            if slicing:
+                await toggle_slicing()
             await leave_cinema()
 
     def on_resize(e: ft.PageResizeEvent):
@@ -1248,7 +1411,8 @@ async def main(page: ft.Page):
     )
     page.on_keyboard_event = on_key
     page.on_resize = on_resize
-    page.add(root)
+    section_host = ft.Container(visible=False, alignment=ft.Alignment.TOP_CENTER)
+    page.add(root, section_host)
     if not page.web:
         await page.window.center()
     try:
@@ -1262,9 +1426,10 @@ async def main(page: ft.Page):
         BACKGROUND_TASKS.add(task)  # the event loop only holds weak references to tasks
         task.add_done_callback(BACKGROUND_TASKS.discard)
 
-    # Optional command line: seed, year, realm name, --globe and --replay.
+    # Optional command line: seed, year, realm name, --globe, --replay and --cut=Y0,X0,Y1,X1.
     flags = {"--globe", "--replay"}
-    args = [a for a in sys.argv[1:] if a not in flags]
+    cut_arg = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--cut=")), None)
+    args = [a for a in sys.argv[1:] if a not in flags and not a.startswith("--cut=")]
     if "--globe" in sys.argv[1:]:
         view = "globe"
         view_picker.selected = ["globe"]
@@ -1287,6 +1452,11 @@ async def main(page: ft.Page):
         task = asyncio.create_task(toggle_play())
         BACKGROUND_TASKS.add(task)
         task.add_done_callback(BACKGROUND_TASKS.discard)
+    if cut_arg and world is not None:
+        y0, x0, y1, x1 = (int(v) for v in cut_arg.split(","))
+        await toggle_slicing()
+        slice_line = ((y0, x0), (y1, x1))
+        await open_section()
 
 
 if __name__ == "__main__":
