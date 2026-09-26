@@ -40,6 +40,10 @@ jobs:
               print(f"world {text}: {len(p.kingdoms)} realms, {len(p.towns)} towns, {p.year - p.history.start} years")
           EOF
 
+      # assets/index.html is a copy of Flet's page plus the link-preview tags; catch it going stale.
+      - name: Web page matches the installed Flet
+        run: uv run --no-sync python scripts/check_index_html.py
+
   terraform:
     name: Terraform
     runs-on: ubuntu-latest

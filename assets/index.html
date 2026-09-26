@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <base href="/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <!-- atlas:meta - Atlas's changes to Flet's index.html live only in this block (see scripts/check_index_html.py) -->
+  <title>Atlas of Seeds</title>
+  <meta name="description" content="Type a number or a word, get a world, and scrub through its history on a spinning globe.">
+  <meta name="apple-mobile-web-app-title" content="Atlas">
+  <link rel="canonical" href="https://atlasofseeds.com/">
+
+  <!-- Link previews (Slack, Discord, X, LinkedIn, iMessage...): crawlers don't run JavaScript, so these must be in the HTML -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Atlas of Seeds">
+  <meta property="og:url" content="https://atlasofseeds.com/">
+  <meta property="og:title" content="Atlas of Seeds">
+  <meta property="og:description" content="Type a number or a word, get a world, and scrub through its history on a spinning globe.">
+  <meta property="og:image" content="https://atlasofseeds.com/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="Atlas showing world 282 on a spinning globe, with its realms, towns and a war">
+  <meta name="twitter:card" content="summary_large_image">
+  <!-- /atlas:meta -->
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png" />
+
+  <link rel="manifest" href="manifest.json">
+
+  <script>
+    // Reload when WebKit restores the page from the back/forward cache instead
+    // of resuming it. WebKit restores a Flutter app with its frame scheduling
+    // broken: pointer events, the websocket, and patch application all keep
+    // working, but scheduled frames never render, so the app silently freezes
+    // at its last painted state. A restore can paint one synchronous catch-up
+    // frame, so even re-registering with the server is not enough - the very
+    // next update wedges again. Only a fresh engine recovers reliably.
+    //
+    // For a hosted app the Flet session lives on the server and survives the
+    // reload, so state is preserved. Gated to WebKit (every browser on iOS,
+    // Safari on macOS) because other engines restore correctly - and for a
+    // published Pyodide app, where state lives in the page, an unnecessary
+    // reload would destroy it.
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted &&
+        navigator.vendor && navigator.vendor.startsWith('Apple')) {
+        window.location.reload();
+      }
+    });
+  </script>
+
+  <script>
+    var flet = {
+      pyodide: false,
+      multiView: false,
+      noCdn: false,
+      webSocketEndpoint: "/ws",
+      entrypointBaseUrl: "/",
+      assetBase: "/",
+      routeUrlStrategy: "path",
+      // Left unset so Flutter resolves CanvasKit and the Noto fallback fonts
+      // from their CDNs. `patch_index.py` fills both in with local paths when
+      // building with `--no-cdn`, and a host serving its own copy of the
+      // runtime can assign them without also claiming a no-CDN build.
+      canvasKitBaseUrl: null,
+      // Default fallback only — `patch_index.py` overrides this with the
+      // resolved per-build URL (CDN or local) at deploy time. The `.mjs`
+      // suffix is required because python-worker.js is a module worker
+      // that loads the runtime via dynamic `import()`. See client/web/python.js.
+      pyodideUrl: "/pyodide/pyodide.mjs",
+      webRenderer: "auto",
+      fontFallbackBaseUrl: null,
+      appPackageUrl: "app.tar.gz"
+    }
+
+    flet.flutterAppLoaded = new Promise((resolve) => {
+      flet.flutterAppResolve = resolve;
+    });
+
+    flet.flutterAppLoaded.then((flutterApp) => {
+      console.log("Flutter app loaded");
+    });
+  </script>
+
+  <!-- fletAppConfig -->
+
+  <script src="python.js"></script>
+</head>
+
+<body>
+  <div id="loading" role="status" aria-label="Loading">
+    <style>
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #ffffff;
+      }
+
+      #loading img {
+        width: 200px;
+        max-width: 50vw;
+        max-height: 50vh;
+        object-fit: contain;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        #loading {
+          background: #222222;
+        }
+      }
+    </style>
+    <img src="icons/loading-animation.png" alt="" />
+  </div>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

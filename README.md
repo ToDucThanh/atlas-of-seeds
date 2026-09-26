@@ -84,6 +84,7 @@ flowchart LR
 | `sandbox_ui.py` | The sandbox screen: materials, brush, play and pause |
 | `sound.py` | Synthesised drones and event cues |
 | `soundtrack.py` | Plays them in Flet, on the desktop and in the browser |
+| `assets/` | The web page Flet serves, with the title and link-preview tags, and the preview image |
 
 ## License
 
