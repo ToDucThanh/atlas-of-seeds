@@ -139,6 +139,8 @@ class SandboxView:
                         on_right_pan_start=lambda e: self.press(e, erase=True),
                         on_right_pan_update=self.move,
                         on_right_pan_end=self.release,
+                        on_secondary_tap_down=lambda e: self.press(e, erase=True),  # a right-click erases too
+                        on_secondary_tap_up=self.release,
                         on_hover=self.move,
                         on_exit=self.leave,
                         on_scroll=self.scroll,
@@ -168,10 +170,14 @@ class SandboxView:
     def release(self, e=None):
         ft.context.disable_auto_update()
         self.pointer_down = self.erasing = False
+        if self.pointer is not None and not (0 <= self.pointer[0] < self.world.width
+                                             and 0 <= self.pointer[1] < self.world.height):
+            self.pointer = None  # a stroke let go off the canvas: no brush ring stuck at the edge
 
     def leave(self, e):
-        self.pointer = None
-        self.release()
+        ft.context.disable_auto_update()
+        if not self.pointer_down:  # mid-stroke, the pan keeps reporting past the edge, so the stroke carries on
+            self.pointer = None
 
     def scroll(self, e: ft.ScrollEvent):
         if e.scroll_delta and e.scroll_delta.y:
@@ -207,6 +213,8 @@ class SandboxView:
         self.play_button.update()
 
     def on_key(self, e: ft.KeyboardEvent):
+        if e.ctrl or e.meta or e.alt:
+            return  # Cmd+C and friends belong to the system, not to Clear
         key = e.key.lower()
         if key in ("space", " "):
             self.toggle_playing()

@@ -168,7 +168,9 @@ async def main(page: ft.Page):
     raw_image = ft.RawImage(width=MAP_W, height=MAP_H, fit=ft.BoxFit.FILL, filter_quality=ft.FilterQuality.NONE)
     labels = ft.Stack(width=MAP_W, height=MAP_H, opacity=0, animate_opacity=700)
     globe_labels = ft.Stack(width=MAP_W, height=MAP_H, opacity=0, animate_opacity=700, visible=False)
-    status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+    # As wide as the map, so a long description is cut short rather than widening the column into the panel.
+    status = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT, width=MAP_W, no_wrap=True,
+                     overflow=ft.TextOverflow.ELLIPSIS)
     progress = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
 
     def label_text(text, size, color="#f4efe4", weight=ft.FontWeight.W_500, italic=False, spacing=0.0):
@@ -274,7 +276,7 @@ async def main(page: ft.Page):
             emoji = MARKER_STYLE[m.kind][0]
             cx, cy = m.x * SCALE, m.y * SCALE
             if m.kind == "crown":  # a small crown beside the capital star; the ticker tells the story
-                ctl = ft.Container(left=cx + 3, top=cy - 22, tooltip=m.caption, opacity=0, scale=0.6,
+                ctl = ft.Container(left=cx + 3, top=cy - 22, opacity=0, scale=0.6,  # tooltip only while shown
                                    animate_opacity=300, animate_scale=pop,
                                    content=ft.Text(emoji, size=14, style=ft.TextStyle(shadow=LABEL_SHADOW)))
             else:
@@ -373,8 +375,12 @@ async def main(page: ft.Page):
         if world is None or owners is None or cell is None or cell == hovered_cell:
             return
         hovered_cell = cell
-        status.value = (CUT_HINT + " · " if slicing else "") + world.describe_cell(*cell, owners)
+        status.value = describe(cell)
         status.update()
+
+    def describe(cell: tuple[int, int]) -> str:
+        """The status line for a hovered cell, still carrying the cut hint while a cut is being made."""
+        return (CUT_HINT + " · " if slicing else "") + world.describe_cell(*cell, owners)
 
     async def on_tap(e):
         cell = cell_at(e.local_position)
@@ -549,11 +555,14 @@ async def main(page: ft.Page):
 
     async def set_view_to(name: str):
         nonlocal view, spin_velocity
+        if slicing and name == "globe":
+            await toggle_slicing()  # cuts are drawn on the flat map only
         view = name
         view_picker.selected = [view]
         set_focus(None)
         labels.visible, globe_labels.visible = view == "map", view == "globe"
-        detector.mouse_cursor = ft.MouseCursor.GRAB if view == "globe" else ft.MouseCursor.CLICK
+        detector.mouse_cursor = (ft.MouseCursor.PRECISE if slicing else
+                                 ft.MouseCursor.GRAB if view == "globe" else ft.MouseCursor.CLICK)
         spin_velocity = AUTO_SPIN
         page.update()
         redraw.set()
@@ -697,6 +706,8 @@ async def main(page: ft.Page):
             for ctl, m in marker_controls:
                 active = m.start <= year < m.end
                 ctl.opacity, ctl.scale = (1.0, 1.0) if active else (0.0, 0.6)
+                if m.kind == "crown":  # a faded-out crown still takes the pointer, so it must not keep its caption
+                    ctl.tooltip = m.caption if active else None
             update_dynasty()
             for point in rise.get("cursor", ()):
                 point.x = year
@@ -705,7 +716,7 @@ async def main(page: ft.Page):
             ticker_year.value, ticker.value = (str(latest[0]), latest[1]) if latest else ("", "Before recorded history.")
             cine_year.value, cine_ticker.value = f"Year {int(year)}", ticker.value
             if hovered_cell is not None:
-                status.value = p.describe_cell(*hovered_cell, owners)
+                status.value = describe(hovered_cell)
             try:
                 page.update()
             except RuntimeError:
@@ -1040,6 +1051,8 @@ async def main(page: ft.Page):
     # ---------------------------------------------------------------- toolbar
 
     async def submit_seed():
+        if not seed_field.value.strip():
+            seed_field.value = DEFAULT_SEED  # a blank field makes the default world, so say which
         await create_world(seed_field.value)
 
     seed_field = ft.TextField(
@@ -1267,12 +1280,13 @@ async def main(page: ft.Page):
 
     async def close_section():
         """Back to the map, carrying what happened in the slice onto it."""
-        nonlocal section_view, section_cut, flat_key
+        nonlocal section_view, section_cut, flat_key, hovered_cell
         if section_view is None:
             return
         section_view.stop()
         counts = section_cut.write_back(world, section_view.world.mat) if world is not None else {}
         section_view = section_cut = None
+        hovered_cell = None  # the cell hovered before the cut would overwrite the verdict below on the next frame
         if counts:
             flat_key = None  # the terrain changed: render it afresh
             words = {"burned": "burned", "flooded": "flooded", "new land": "risen from the sea",
