@@ -1,0 +1,86 @@
+#cloud-config
+# First-boot setup for the Atlas server (DEPLOY.md steps 2, 4 and 6). The app itself arrives later by rsync.
+# Watch it finish with: cloud-init status --wait   (log: /var/log/cloud-init-output.log)
+
+package_update: true
+package_upgrade: true
+packages:
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - curl
+  - gpg
+
+write_files:
+  - path: /etc/systemd/system/atlas.service
+    content: |
+      [Unit]
+      Description=Atlas (Flet web app)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=ubuntu
+      WorkingDirectory=/home/ubuntu/atlas
+      Environment=FLET_FORCE_WEB_SERVER=1
+      Environment=FLET_SERVER_IP=127.0.0.1
+      Environment=FLET_SERVER_PORT=${app_port}
+      Environment=PYTHONUNBUFFERED=1
+      ExecStart=/home/ubuntu/atlas/.venv/bin/python world.py
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Staged under /root until Caddy's package has created the caddy group; runcmd moves them into place.
+  - path: /root/atlas-setup/origin.pem
+    permissions: "0600"
+    content: ${jsonencode(origin_cert_pem)}
+  - path: /root/atlas-setup/origin-key.pem
+    permissions: "0600"
+    content: ${jsonencode(origin_key_pem)}
+  - path: /root/atlas-setup/Caddyfile
+    content: |
+      {
+          # Port 80 is closed; Cloudflare only ever connects on 443.
+          auto_https disable_redirects
+      }
+
+      ${domain} {
+          tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
+          reverse_proxy 127.0.0.1:${app_port}
+      }
+
+      ${www_domain} {
+          tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
+          redir https://${domain}{uri} permanent
+      }
+
+runcmd:
+  # 1 GB of swap as a safety net for the 2 GB of RAM.
+  - fallocate -l 1G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+  # Caddy from its official apt repository.
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o /etc/apt/sources.list.d/caddy-stable.list
+  - chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+
+  # Origin certificate and Caddyfile.
+  - install -d -o root -g caddy -m 750 /etc/caddy/certs
+  - install -o root -g caddy -m 640 /root/atlas-setup/origin.pem /root/atlas-setup/origin-key.pem /etc/caddy/certs/
+  - install -o root -g root -m 644 /root/atlas-setup/Caddyfile /etc/caddy/Caddyfile
+  - rm -rf /root/atlas-setup
+  - caddy validate --config /etc/caddy/Caddyfile
+  - systemctl restart caddy
+
+  # uv for the ubuntu user, and the Atlas service (it starts once the app is copied over and deployed).
+  - su - ubuntu -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  - systemctl daemon-reload
+  - systemctl enable atlas
