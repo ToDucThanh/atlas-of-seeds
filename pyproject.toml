@@ -9,6 +9,7 @@ dependencies = [
     "flet-charts>=1.0.1",
     "flet[all]>=1.0.1",
     "numpy>=2.5.3",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]

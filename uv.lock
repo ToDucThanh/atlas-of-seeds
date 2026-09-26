@@ -691,6 +691,7 @@ dependencies = [
     { name = "flet-audio" },
     { name = "flet-charts" },
     { name = "numpy" },
+    { name = "pillow" },
 ]
 
 [package.dev-dependencies]
@@ -704,6 +705,7 @@ requires-dist = [
     { name = "flet-audio", specifier = ">=1.0.1" },
     { name = "flet-charts", specifier = ">=1.0.1" },
     { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pillow", specifier = ">=12.3.0" },
 ]
 
 [package.metadata.requires-dev]

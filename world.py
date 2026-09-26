@@ -12,6 +12,7 @@ e.g.       uv run python world.py 282 1184 Aar     (opens that world in 1184, wi
 """
 
 import asyncio
+import io
 import math
 import random
 import sys
@@ -20,6 +21,7 @@ import time
 import flet as ft
 import flet_charts as fch
 import numpy as np
+from PIL import Image
 
 import globe as gl
 import planet as pl
@@ -37,6 +39,10 @@ PLAY_SECONDS = 12  # a full replay of history, before slow motion around battles
 PLAY_FPS = 30
 SLOW_MOTION = 0.22
 SPIN_FPS = 60
+# Web visitors get globe frames over the network: as JPEG (about 37 KB, where Flet's default PNG is about
+# 240 KB and ten times slower to encode), and at most this many a second.
+WEB_GLOBE_FPS = 15
+WEB_JPEG_QUALITY = 80
 AUTO_SPIN = 0.16  # radians per second when idle: a full day in about 40 seconds
 MAX_SPIN = 8.0  # cap on flick speed, radians per second
 HOVER_HOLD = 4.0  # seconds the globe stays still after the mouse last moved over it
@@ -107,6 +113,12 @@ def event_badge(m) -> ft.Control:
     )
 
 
+def jpeg(frame: np.ndarray) -> bytes:
+    out = io.BytesIO()
+    Image.fromarray(np.ascontiguousarray(frame[..., :3])).save(out, "JPEG", quality=WEB_JPEG_QUALITY)
+    return out.getvalue()
+
+
 def format_population(n: int) -> str:
     return f"{n / 1e6:.1f} million" if n >= 1_000_000 else f"{n:,}"
 
@@ -159,6 +171,7 @@ async def main(page: ft.Page):
     slice_line: tuple[tuple[int, int], tuple[int, int]] | None = None  # map cells (y, x) at each end of the drag
     section_view: sandbox_ui.SandboxView | None = None  # the open cross-section, if any
     section_cut: sec.Section | None = None  # ...the slice it was cut as, to compare against when it closes
+    session_closed = False  # Flet has let this visitor's session go, after a disconnect with no reconnect
     soundtrack = st.Soundtrack(page, wants_drone=lambda: playing or cinema)
     wakelock = ft.Wakelock()
     prefs = ft.SharedPreferences()
@@ -550,6 +563,13 @@ async def main(page: ft.Page):
             return draw_slice(frame) if slicing and slice_line is not None else frame
         return globe.render(frame, spin, ~world.land, town_lights)
 
+    async def show(frame: np.ndarray):
+        """Put a frame on the map view. The flat map stays PNG on the web too: JPEG smudges its crisp borders."""
+        if page.web and view == "globe":
+            await raw_image.render_encoded(await asyncio.to_thread(jpeg, frame))
+        else:
+            await raw_image.render(frame)
+
     async def set_view(e):
         await set_view_to(e.control.selected[0])
 
@@ -672,8 +692,13 @@ async def main(page: ft.Page):
         """Draws the latest requested state; drags, playback and the spinning globe just set `redraw`,
         so frames coalesce. While only the globe turns, the flat frame is reused and the panels are left alone."""
         nonlocal owners, flat, lights, flat_key
+        frame_due = 0.0  # on the web, the globe's next frame may not be drawn before this
         while True:
             await redraw.wait()
+            if session_closed:
+                return
+            if page.web and view == "globe":  # turns requested meanwhile coalesce into the next frame
+                await asyncio.sleep(max(0.0, frame_due - time.monotonic()))
             redraw.clear()
             if world is None or revealing or section_view is not None:
                 continue  # (while a cross-section is open the map's image is off the page)
@@ -684,10 +709,18 @@ async def main(page: ft.Page):
                 owners = p.history.owners_at(p, year)
                 flat, flat_key = pl.render(p, mode, selected, year=year), key
                 lights = gl.town_lights(p, owners)
+            frame_due = time.monotonic() + 1 / WEB_GLOBE_FPS
             try:
-                await raw_image.render(present(flat, lights))
-            except (RuntimeError, TimeoutError):
+                await show(present(flat, lights))
+            except RuntimeError:
                 return  # window closed
+            except TimeoutError:
+                # The client never acknowledged the frame: its tab was hidden (the server isn't always told),
+                # or it lost its connection. Try again, at most once per ack timeout, until it answers or
+                # Flet closes the session.
+                flat_key = None  # then redraw it all, labels and panel too
+                redraw.set()
+                continue
             if p is not world:
                 continue
             if view == "globe":
@@ -1384,10 +1417,14 @@ async def main(page: ft.Page):
                 if mine != generation:
                     return
                 t = 1 - (i + 1) / REVEAL_FRAMES
-                await raw_image.render(present(pl.render(p, mode, None, sea_rise=(1 - p.sea) * t * t)))
+                await show(present(pl.render(p, mode, None, sea_rise=(1 - p.sea) * t * t)))
                 await asyncio.sleep(1 / 60)
-        except (RuntimeError, TimeoutError):
+        except RuntimeError:
             return  # window closed mid-animation
+        except TimeoutError:
+            pass  # a frame went unacknowledged (say, the tab was hidden): skip to the world revealed
+        if mine != generation:
+            return  # a newer world began during the wait
         revealing = False
         labels.opacity = globe_labels.opacity = 1
         progress.visible = False
@@ -1423,8 +1460,16 @@ async def main(page: ft.Page):
         spacing=16,
         vertical_alignment=ft.CrossAxisAlignment.START,
     )
+
+    def on_close():
+        nonlocal session_closed
+        ft.context.disable_auto_update()  # nothing left to update
+        session_closed = True
+        redraw.set()  # wake the renderer so it can stop
+
     page.on_keyboard_event = on_key
     page.on_resize = on_resize
+    page.on_close = on_close
     section_host = ft.Container(visible=False, alignment=ft.Alignment.TOP_CENTER)
     page.add(root, section_host)
     if not page.web:
